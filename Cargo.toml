@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-diesel = { version = "2.3.5" }
+diesel = { version = "2.3.5", features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"] }
 diesel-async = { version = "0.7.4", features = ["migrations", "mobc"] }
 diesel-turso = { git = "https://github.com/Choochmeque/diesel_turso", features = ["mobc"] }
 diesel_migrations = "2.3.1"

@@ -20,6 +20,9 @@ and writing the actual data.
 A catalog is expected to be less than 0.5% of the size of the data it's referencing, even with very
 high amounts of files and fragmentation of said files.
 
+`fs_` fields are filled in when possible but are not required for the catalog to function; they are
+used to speed up a subsequent run, when the machine and filesystem IDs match.
+
 ### `metadata` table
 
 Columns: `key` (text), `value` (jsonb)
@@ -39,10 +42,25 @@ Optional keys:
 - `source_path`: the source path that was saved in this catalog
 - `started`: when the process of creating the catalog started
 - `fs_type`: type of filesystem
+- `fs_id`: UUID of the filesystem
 - `from_writeable`: present and `true` if the catalog was created from a writeable tree
 - Any other arbitrary data, prefixed with `extra.`
 
 ### `extents` table
+
+Columns:
+
+- `extent_id` (blob) primary key: BLAKE3 hash of the contents
+- `bytes` (integer): size of the extent in bytes
+- `fs_object_id` (integer, optional): in BTRFS, the object ID of the extent
+- `fs_checksum_type` (integer, optional): in BTRFS, the `csum_type`
+- `fs_checksum` (blob, optional): in BTRFS, the `csum`
+
+Indexes:
+
+- `extent_id`
+
+### `blob_extents` table
 
 Columns:
 
@@ -62,7 +80,7 @@ Indexes:
 
 Columns:
 
-- `blob_id` (blob): BLAKE3 hash of the full (concatenated) contents
+- `blob_id` (blob): BLAKE3 hash of the extent map (described below)
 - `bytes` (integer): total size in bytes of the blob
 - `extents` (integer): amount of extents in this blob
 
@@ -88,6 +106,7 @@ Columns:
 - `unix_group_id` (integer, optional)
 - `unix_group_name` (text, optional)
 - `special` (jsonb, optional): if this is a special file (symlink, hardlink, device, etc), this info
+- `fs_inode` (integer, optiona): the inode of the file on the machine
 - `extra` (jsonb, optional): any additional data
 
 Paths are normalised in that folder separators are always forward slashes (unix style), and Windows
