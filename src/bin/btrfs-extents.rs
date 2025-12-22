@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     io::{Error, Result},
+    mem::take,
     os::{
         fd::{AsRawFd, RawFd},
         linux::fs::MetadataExt,
@@ -71,6 +72,7 @@ pub struct BtrfsSearch {
 // const _: [(); SearchKey::SIZE_BYTES.unwrap() - SearchKey::SIZE] = [];
 impl BtrfsSearch {
     const SIZE: usize = 104;
+    const LEADING_OFFSET: usize = Self::SIZE + 8;
 
     fn ensure_size() {
         // runtime alternative to the DekuSize approach
@@ -87,28 +89,25 @@ impl BtrfsSearch {
     }
 
     fn exec_with_file_size(self, fd: RawFd, file_size: usize) -> Result<BtrfsSearchResults> {
-        self.exec(
-            fd,
-            (file_size / (128 * 1024) * self.result_size())
-                .max(3 * self.result_size())
-                .min(1024_usize.pow(2)),
-            // there doesn't appear to be a real limit, but we pick
-            // a 1MB maximum to avoid doing too large allocations.
-        )
+        let buf_size = (file_size / (128 * 1024) * self.result_size())
+            .max(3 * self.result_size())
+            .min(1024_usize.pow(2));
+        // there doesn't appear to be a real limit, but we pick
+        // a 1MB maximum to avoid doing too large allocations.
+
+        let buf = vec![0u8; Self::LEADING_OFFSET + dbg!(buf_size)].into_boxed_slice();
+        self.exec_with_buf(fd, buf)
     }
 
-    fn exec(mut self, fd: RawFd, buf_size: usize) -> Result<BtrfsSearchResults> {
-        let offset = Self::SIZE + 8;
-        let mut buf = vec![0u8; offset + dbg!(buf_size)];
-
+    fn exec_with_buf(mut self, fd: RawFd, mut buf: Box<[u8]>) -> Result<BtrfsSearchResults> {
         // clear nr_items (set it to max) so we always grab
         // as many results as the kernel will give us
         self.nr_items = u32::MAX;
         self.to_slice(&mut buf)?;
 
-        buf[BtrfsSearch::SIZE..offset].copy_from_slice(&(buf_size as u64).to_ne_bytes()[..]);
+        let buf_size = (buf.len() - Self::LEADING_OFFSET) as u64;
+        buf[BtrfsSearch::SIZE..Self::LEADING_OFFSET].copy_from_slice(&buf_size.to_ne_bytes()[..]);
 
-        let mut buf = buf.into_boxed_slice();
         if unsafe { ioctl(fd, BTRFS_IOC_TREE_SEARCH_V2 as _, buf.as_mut_ptr()) } != 0 {
             return Err(Error::last_os_error());
         }
@@ -117,7 +116,7 @@ impl BtrfsSearch {
 
         Ok(BtrfsSearchResults {
             buf,
-            offset,
+            offset: Self::LEADING_OFFSET,
             search,
             next_search_offset: None,
             fd,
@@ -346,7 +345,7 @@ impl Iterator for BtrfsSearchResults {
         }
 
         let buf = &self.buf[self.offset..];
-        if !buf.is_empty() {
+        if buf.is_empty() {
             // should not happen (should be caught by other bits)
             // but let's handle it anyway to make sure
             return None;
@@ -379,17 +378,16 @@ impl Iterator for BtrfsSearchResults {
         }
 
         // we've arrived at the end of our buffer, but there's more data to be had!
-        // iterate onwards with a fixed 512K buffer, as we're either dealing with
-        // a very large number of extents that didn't fit in 1MB, or we estimated
-        // too low from the file size; so compromise.
-        match dbg!(self.search.with_offset(off)).exec(self.fd, 512 * 1024) {
+        // iterate onwards but reuse the same buffer (zeroed) to avoid reallocating
+        let mut buf = take(&mut self.buf);
+        buf.fill(0);
+        match dbg!(self.search.with_offset(off)).exec_with_buf(self.fd, buf) {
             Err(err) => return Some(Err(err.into())),
             Ok(next) => {
                 *self = next;
 
-                // recursing in an iterator is not great, but this will be pretty
-                // limited: it will either return None or Some and should not itself
-                // recurse, and then the outer loop will reset us back to iterative.
+                // recursing in an iterator is not great, but this will be limited:
+                // it will either return None or Some and should not itself recurse
                 return self.next();
             }
         }
