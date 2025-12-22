@@ -5,6 +5,7 @@ use std::{
         fd::{AsRawFd, RawFd},
         linux::fs::MetadataExt,
     },
+    u32,
 };
 
 use deku::prelude::*;
@@ -30,7 +31,7 @@ use linux_raw_sys::{
 };
 
 fn main() -> Result<()> {
-    SearchKey::ensure_size();
+    BtrfsSearch::ensure_size();
 
     let path = std::env::args().nth(1).expect("USAGE: btrfs-extents PATH");
     let file = File::open(&path)?;
@@ -38,22 +39,17 @@ fn main() -> Result<()> {
     let stat = file.metadata()?;
     let st_ino = stat.st_ino();
 
-    let search_args = BtrfsSearch::for_inode(st_ino);
-    let items = search_args.exec(file.as_raw_fd(), 1000)?;
+    let search_args = BtrfsSearch::default().only_extents().for_inode(st_ino);
+    let items = search_args.exec_with_file_size(file.as_raw_fd(), stat.len() as _)?;
+    let nr_items = items.search.nr_items;
     let items = items.collect::<std::result::Result<Vec<_>, _>>()?;
-    dbg!(&items, items.len(), search_args.key.nr_items);
+    dbg!(items.len(), nr_items);
 
     Ok(())
 }
 
-#[repr(C)]
-#[derive(Debug)]
-struct BtrfsSearch {
-    key: SearchKey,
-}
-
-#[derive(Debug, Copy, Clone, DekuWrite)]
-pub struct SearchKey {
+#[derive(Debug, Copy, Clone, DekuRead, DekuWrite)]
+pub struct BtrfsSearch {
     pub tree_id: u64,
     pub min_objectid: u64,
     pub max_objectid: u64,
@@ -73,7 +69,7 @@ pub struct SearchKey {
 // ensure the size is correct
 // const _: [(); SearchKey::SIZE - SearchKey::SIZE_BYTES.unwrap()] = [];
 // const _: [(); SearchKey::SIZE_BYTES.unwrap() - SearchKey::SIZE] = [];
-impl SearchKey {
+impl BtrfsSearch {
     const SIZE: usize = 104;
 
     fn ensure_size() {
@@ -84,11 +80,77 @@ impl SearchKey {
             "BUG: search key length invalid"
         );
     }
+
+    const fn result_size(self) -> usize {
+        // TODO: compute from self.min_kind through self.max_kind
+        BtrfsSearchResultHeader::SIZE + BtrfsFileExtentItem::SIZE
+    }
+
+    fn exec_with_file_size(self, fd: RawFd, file_size: usize) -> Result<BtrfsSearchResults> {
+        self.exec(
+            fd,
+            (file_size / (128 * 1024) * self.result_size())
+                .max(2 * self.result_size())
+                .min(1024_usize.pow(2)),
+            // there doesn't appear to be a real limit, but we pick
+            // a 1MB maximum to avoid doing too large allocations.
+        )
+    }
+
+    fn exec(mut self, fd: RawFd, buf_size: usize) -> Result<BtrfsSearchResults> {
+        let offset = Self::SIZE + 8;
+        let mut buf = vec![0u8; offset + dbg!(buf_size)];
+
+        // clear nr_items (set it to max) so we always grab
+        // as many results as the kernel will give us
+        self.nr_items = u32::MAX;
+        self.to_slice(&mut buf)?;
+
+        buf[BtrfsSearch::SIZE..offset].copy_from_slice(&(buf_size as u64).to_ne_bytes()[..]);
+
+        let mut buf = buf.into_boxed_slice();
+        if unsafe { ioctl(fd, BTRFS_IOC_TREE_SEARCH_V2 as _, buf.as_mut_ptr()) } != 0 {
+            return Err(Error::last_os_error());
+        }
+
+        let (_rest, search) = BtrfsSearch::from_bytes((&buf, 0))?;
+
+        Ok(BtrfsSearchResults {
+            buf,
+            offset,
+            search,
+            next_search_offset: None,
+            fd,
+        })
+    }
+
+    fn only_extents(self) -> Self {
+        Self {
+            min_kind: BTRFS_EXTENT_DATA_KEY,
+            max_kind: BTRFS_EXTENT_DATA_KEY,
+            ..self
+        }
+    }
+
+    fn for_inode(self, st_ino: u64) -> Self {
+        Self {
+            min_objectid: st_ino,
+            max_objectid: st_ino,
+            ..self
+        }
+    }
+
+    fn with_offset(self, offset: u64) -> Self {
+        Self {
+            min_offset: offset,
+            ..self
+        }
+    }
 }
 
-impl Default for SearchKey {
+impl Default for BtrfsSearch {
     fn default() -> Self {
-        SearchKey {
+        BtrfsSearch {
             tree_id: 0,
             min_objectid: 0,
             max_objectid: u64::MAX,
@@ -105,43 +167,7 @@ impl Default for SearchKey {
     }
 }
 
-impl BtrfsSearch {
-    fn exec(&self, fd: RawFd, buf_size: u64) -> Result<BtrfsSearchResults> {
-        assert!(
-            buf_size < 16 * 1024_u64.pow(3),
-            "buf_size cannot be larger than 16MiB (kernel limit)"
-        );
-
-        let offset = SearchKey::SIZE + 8;
-
-        let mut buf = vec![0u8; offset + buf_size as usize];
-        self.key.to_slice(&mut buf)?;
-        buf[SearchKey::SIZE..offset].copy_from_slice(&buf_size.to_ne_bytes()[..]);
-        let mut buf = buf.into_boxed_slice();
-
-        if unsafe { ioctl(fd, BTRFS_IOC_TREE_SEARCH_V2 as _, buf.as_mut_ptr()) } != 0 {
-            return Err(Error::last_os_error());
-        }
-
-        Ok(BtrfsSearchResults { buf, offset })
-    }
-
-    fn new(key: SearchKey) -> Self {
-        Self { key }
-    }
-
-    fn for_inode(st_ino: u64) -> Self {
-        Self::new(SearchKey {
-            min_objectid: st_ino,
-            max_objectid: st_ino,
-            min_kind: BTRFS_EXTENT_DATA_KEY,
-            max_kind: BTRFS_EXTENT_DATA_KEY,
-            ..Default::default()
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, DekuRead)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, DekuRead)]
 pub struct BtrfsSearchResultHeader {
     pub transid: u64,
     pub objectid: u64,
@@ -153,10 +179,11 @@ impl BtrfsSearchResultHeader {
     const SIZE: usize = 32;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, DekuRead)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, DekuRead)]
 #[deku(id_type = "u32", bytes = 4)]
 pub enum BtrfsSearchResultKind {
     #[deku(id = 0)]
+    #[default]
     None,
     #[deku(id = "BTRFS_INODE_ITEM_KEY")]
     InodeItem,
@@ -304,35 +331,60 @@ pub struct BtrfsSearchResult {
 struct BtrfsSearchResults {
     buf: Box<[u8]>,
     offset: usize,
+    search: BtrfsSearch,
+    next_search_offset: Option<u64>,
+    fd: RawFd,
 }
 
 impl Iterator for BtrfsSearchResults {
     type Item = std::result::Result<BtrfsSearchResult, DekuError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.search.nr_items == 0 {
+            return None;
+        }
+
         let buf = &self.buf[self.offset..];
         if buf.is_empty() {
             return None;
         }
 
         match BtrfsSearchResult::from_bytes((&buf, 0)) {
+            Err(err) => return Some(Err(err)),
             Ok((_rest, result)) => {
-                if result.header.kind == BtrfsSearchResultKind::None {
-                    // we're done, all following parses will return zero
-                    self.offset = self.buf.len();
-                    return None;
+                // kind is never None in legitimate output, so we have to assume
+                // we're reading unitialised space. don't interpret it as anything!
+                if result.header.kind != BtrfsSearchResultKind::None {
+                    self.offset += BtrfsSearchResultHeader::SIZE + result.item.len();
+                    self.next_search_offset = Some(result.header.offset + 1);
+                    return Some(Ok(result));
                 }
-
-                self.offset += BtrfsSearchResultHeader::SIZE + result.item.len();
-                Some(Ok(result))
             }
-            Err(err) => {
-                if *buf == [0] {
-                    // list ends with a null byte?
-                    return None;
-                }
+        }
 
-                Some(Err(err))
+        let Some(off) = self.next_search_offset else {
+            return None;
+        };
+
+        if dbg!(self.buf[self.offset..].len()) >= dbg!(self.search.result_size() * 2) {
+            // if the buffer still has more than enough space in it for results
+            // we don't need to do another read to know we're at the end!
+            return None;
+        }
+
+        // we've arrived at the end of our buffer, but there's more data to be had!
+        // iterate onwards with a fixed 512K buffer, as we're either dealing with
+        // a very large number of extents that didn't fit in 1MB, or we estimated
+        // too low from the file size; so compromise.
+        match dbg!(self.search.with_offset(off)).exec(self.fd, 512 * 1024) {
+            Err(err) => return Some(Err(err.into())),
+            Ok(next) => {
+                *self = next;
+
+                // recursing in an iterator is not great, but this will be pretty
+                // limited: it will either return None or Some and should not itself
+                // recurse, and then the outer loop will reset us back to iterative.
+                return self.next();
             }
         }
     }
