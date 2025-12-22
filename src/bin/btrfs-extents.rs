@@ -341,11 +341,14 @@ impl Iterator for BtrfsSearchResults {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.search.nr_items == 0 {
+            // the kernel says there's nothing more to see
             return None;
         }
 
         let buf = &self.buf[self.offset..];
-        if buf.is_empty() {
+        if !buf.is_empty() {
+            // should not happen (should be caught by other bits)
+            // but let's handle it anyway to make sure
             return None;
         }
 
@@ -363,6 +366,8 @@ impl Iterator for BtrfsSearchResults {
         }
 
         let Some(off) = self.next_search_offset else {
+            // should not happen (should be caught by other bits)
+            // but let's handle it anyway to make sure
             return None;
         };
 
