@@ -6,7 +6,7 @@ use diesel_migrations::MigrationHarness;
 use diesel_turso::AsyncTursoConnection;
 use facet::Facet;
 use jiff::Timestamp;
-use miette::{IntoDiagnostic, WrapErr, Result, miette};
+use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use mobc::Pool;
 use uuid::Uuid;
 
@@ -38,8 +38,7 @@ where
     T: Facet<'facet> + Debug,
 {
     let metadata = models::Metadata::new(key, value)
-        .wrap_err_with(|| format!("insert_metadata({key}, {value:?})"))
-        ?;
+        .wrap_err_with(|| format!("insert_metadata({key}, {value:?})"))?;
     diesel_async::RunQueryDsl::execute(insert_into(schema::metadata::table).values(&metadata), conn)
         .await
         .into_diagnostic()

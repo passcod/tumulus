@@ -1,8 +1,8 @@
-use diesel::prelude::*;
-use diesel::sql_types::Text;
-use diesel::deserialize::{self, FromSql};
-use diesel::serialize::{self, ToSql, Output};
 use diesel::AsExpression;
+use diesel::deserialize::{self, FromSql};
+use diesel::prelude::*;
+use diesel::serialize::{self, Output, ToSql};
+use diesel::sql_types::Text;
 use facet::Facet;
 use facet_format_json::to_vec;
 use jiff::Timestamp;
@@ -35,10 +35,15 @@ where
     DB: diesel::backend::Backend,
     String: FromSql<Text, DB>,
 {
-    fn from_sql(value: <DB as diesel::backend::Backend>::RawValue<'_>) -> deserialize::Result<Self> {
+    fn from_sql(
+        value: <DB as diesel::backend::Backend>::RawValue<'_>,
+    ) -> deserialize::Result<Self> {
         let string_value = <String as FromSql<Text, DB>>::from_sql(value)?;
-        let ts = string_value.parse::<Timestamp>()
-            .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("Failed to parse timestamp: {e}")))?;
+        let ts = string_value.parse::<Timestamp>().map_err(|e| {
+            Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                "Failed to parse timestamp: {e}"
+            ))
+        })?;
         Ok(DbTimestamp(ts))
     }
 }
