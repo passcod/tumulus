@@ -90,7 +90,7 @@ impl BtrfsSearch {
         self.exec(
             fd,
             (file_size / (128 * 1024) * self.result_size())
-                .max(2 * self.result_size())
+                .max(3 * self.result_size())
                 .min(1024_usize.pow(2)),
             // there doesn't appear to be a real limit, but we pick
             // a 1MB maximum to avoid doing too large allocations.
@@ -369,6 +369,7 @@ impl Iterator for BtrfsSearchResults {
         if dbg!(self.buf[self.offset..].len()) >= dbg!(self.search.result_size() * 2) {
             // if the buffer still has more than enough space in it for results
             // we don't need to do another read to know we're at the end!
+            // note how this is checking for 2x while the minimum buf_size is 3x
             return None;
         }
 
