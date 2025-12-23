@@ -89,10 +89,11 @@ impl BtrfsSearch {
     /// lookup for most files under a gigabyte. The buffer is limited to 1 MiB to avoid allocating
     /// and zeroing too much memory repeatedly.
     ///
-    /// When performing lookups in batches, you most likely will want to allocate your own buffer
-    /// sized appropriately for your application, and build your own search key.
+    /// When performing lookups in batches, you most likely will want to use your own buffer size
+    /// appropriately for your application, and build your own search key. Additionally, using the
+    /// low-level methods lets you decouple the lifetime of the file from the iterator.
     ///
-    /// See the [`exec_with_buf()`](Self::exec_with_buf()) documentation for more details.
+    /// See the [`exec_with_buf_size()`](Self::exec_with_buf_size()) documentation for more details.
     pub fn extents_for_file(file: &File) -> Result<BtrfsSearchResults<'_>> {
         let stat = file.metadata()?;
         let file_size = stat.len() as usize;
@@ -106,21 +107,89 @@ impl BtrfsSearch {
         // there doesn't appear to be a real limit, but we pick
         // a 1MB maximum to avoid doing too large allocations.
 
-        let box_size = Self::LEADING_OFFSET + buf_size + Self::SENTINEL_SIZE;
-        debug_assert!(box_size >= search.minimum_buf_size());
-
-        // vec![] allocates directly on the heap, avoiding stack overflows for large bufs
-        let buf = vec![0u8; box_size].into_boxed_slice();
-        search.exec_with_buf(file.as_fd(), buf)
+        search.exec_with_buf_size(file.as_fd(), buf_size)
     }
 
     /// Execute a search on a BTRFS filesystem.
     ///
-    /// The BTRFS filesystem is selected using the `fd` argument: that doesn't need to be
-    /// the FD for the file being looked at e.g. with a `for_inode()` lookup, but it's
-    /// convenient for one-off lookups where the file is already opened to obtain its inode.
-    /// It can be useful to set the FD to some stable reference to the filesystem, so that
-    /// lookups for files that are not on that particular filesystem return no results.
+    /// The `buf_size` specifies the size of the buffer the kernel will write results to.
+    /// Internally, the method allocates a buffer that is slightly larger, to accommodate
+    /// the search request structures.
+    ///
+    /// The search is performed immediately when this method is called, but it may return less
+    /// than the full amount of results available as it fills only the available buffer space.
+    /// The iterator will detect that and issue additional search calls when reaching the end of
+    /// result pages, re-using the buffer each time instead of creating new ones internally. You
+    /// can retrieve the buffer for further re-use with [`exec_with_buf()`](Self::exec_with_buf())
+    /// once done with the iterator, see [`BtrfsSearchResults::into_buf()`].
+    ///
+    /// Compared to calling [`exec_with_buf()`](Self::exec_with_buf()) with your own new buffer,
+    /// this method is slightly more performant as it doesn't zero the buffer twice on initial
+    /// allocation.
+    ///
+    /// The BTRFS filesystem is selected using the `fd` argument: that doesn't need to be the FD
+    /// for the file being looked at e.g. with a `for_inode()` lookup, but it's convenient for
+    /// one-off lookups where the file is already opened to obtain its inode. It can be useful to
+    /// set the FD to some stable reference to the filesystem, so that lookups for files that are
+    /// not on that particular filesystem return no results, and so that the lifetime of the FD is
+    /// not the lifetime of the file being looked up.
+    ///
+    /// Note that the `fd` borrow is passed to the iterator, as it must remain valid so that
+    /// the iterator can execute further searches as required.
+    ///
+    /// # Panics
+    ///
+    /// This method panics when given a size smaller than `self.result_size()`. The panic message
+    /// will reference a larger size, as it comes from [`exec_with_buf()`](Self::exec_with_buf()).
+    ///
+    /// This method also panics when `buf_size > isize::MAX` (as do all allocations), or when the
+    /// allocation fails.
+    pub fn exec_with_buf_size<'fd>(
+        self,
+        fd: BorrowedFd<'fd>,
+        buf_size: usize,
+    ) -> Result<BtrfsSearchResults<'fd>> {
+        // SAFETY: box_size will never be zero
+        let box_size = Self::LEADING_OFFSET + buf_size + Self::SENTINEL_SIZE;
+
+        // SAFETY: exec_with_buf() immediately zeroes the buffer, so it's safe to construct uninit
+        let buf = {
+            // SAFETY: the requirements for calling this safely are:
+            // - align must not be zero: we hardcode to 1
+            // - align must be a power of two: 1 is a power of two
+            // - size, when rounded up to the nearest multiple of align, must <= isize::MAX
+            //
+            // We allocate a region that can hold a `[u8]` of size buf_size: the alignment is 1
+            // and every byte is contiguous without padding.
+            assert!(box_size <= isize::MAX as usize);
+            let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(box_size, 1) };
+
+            // SAFETY: we never read from this region before zeroing
+            // SAFETY: box_size is never zero, which upholds the requirement that layout is non-zero
+            let ptr = unsafe { std::alloc::alloc(layout) };
+            if ptr.is_null() {
+                panic!("Failed to allocate buffer");
+            }
+
+            // SAFETY:
+            // - the allocation must be correct for the type (ensured above)
+            // - the raw pointer points to a valid value of the right type (deliberately not done)
+            // - the pointer has to be non-null (checked above)
+            // - the pointer must be sufficiently aligned (alignment for u8 is 1)
+            // - the pointer must not be used twice
+            let raw = std::ptr::slice_from_raw_parts_mut(ptr, box_size);
+            unsafe { Box::from_raw(raw) }
+        };
+
+        self.exec_with_buf(fd, buf)
+    }
+
+    /// Execute a search on a BTRFS filesystem, re-using a buffer.
+    ///
+    /// This is typically used after obtaining a buffer from the iterator of a previous search.
+    /// You may also use it with a buffer from another source, but it's recommended to use
+    /// [`exec_with_buf_size()`](Self::exec_with_buf_size()) if you were going to allocate a new
+    /// buffer anyway.
     ///
     /// The `buf` argument is used both to hold the search request and then for the kernel
     /// to write results to. It must be appropriately sized: the minimum for the current
@@ -135,10 +204,17 @@ impl BtrfsSearch {
     /// of creating new ones internally. You can retrieve the buffer for further re-use once
     /// done with the iterator, see [BtrfsSearchResults::into_buf()].
     ///
+    /// The BTRFS filesystem is selected using the `fd` argument: that doesn't need to be
+    /// the FD for the file being looked at e.g. with a `for_inode()` lookup, but it's
+    /// convenient for one-off lookups where the file is already opened to obtain its inode.
+    /// It can be useful to set the FD to some stable reference to the filesystem, so that
+    /// lookups for files that are not on that particular filesystem return no results, and
+    /// so that the lifetime of the FD is not the lifetime of the file being looked up.
+    ///
     /// Note that the `fd` borrow is passed to the iterator, as it must remain valid so that
     /// the iterator can execute further searches as required.
     ///
-    /// When allocating the buffer, you should use something like this to avoid running into
+    /// When allocating a buffer, you should use something like this to avoid running into
     /// stack overflows at large buffer sizes (`vec![]` is specially constructed to allocate
     /// directly onto the heap):
     ///
@@ -170,6 +246,7 @@ impl BtrfsSearch {
         );
 
         // SAFETY: always zero the buffer before using it
+        // SAFETY: this additionally forms part of the safety contract in exec_with_buf_size()
         buf.fill(0);
 
         // SAFETY: we detect buffer overruns by writing a sentinel value at the back
