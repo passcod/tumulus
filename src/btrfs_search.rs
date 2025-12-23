@@ -1,3 +1,5 @@
+// File is not supported with Miri's default isolation, so use MIRIFLAGS="-Zmiri-disable-isolation"
+
 use std::{
     fs::File,
     io::{Error, Result},
@@ -10,7 +12,6 @@ use std::{
 };
 
 use deku::prelude::*;
-use libc::ioctl;
 use linux_raw_sys::{
     btrfs::{
         BTRFS_BALANCE_ITEM_KEY, BTRFS_BLOCK_GROUP_ITEM_KEY, BTRFS_CHUNK_ITEM_KEY,
@@ -274,12 +275,23 @@ impl BtrfsSearch {
         // in this function prior to using it, ensuring it's always safe to pass any buffer, as
         // long as it's appropriately-sized, which is checked above. This function owns the FD,
         // so it's guaranteed safe to use.
-        if unsafe {
-            ioctl(
-                fd.as_raw_fd(),
-                BTRFS_IOC_TREE_SEARCH_V2 as _,
-                buf.as_mut_ptr(),
-            )
+        if {
+            #[cfg(miri)]
+            {
+                // Miri doesn't support ioctl, but we still want to use these so Rust doesn't warn
+                dbg!(fd.as_raw_fd(), BTRFS_IOC_TREE_SEARCH_V2, buf.as_mut_ptr());
+                // Returning 0 will essentially simulate the kernel returning no results, except that
+                // nr_items would be incorrectly set. So we later overwrite it just in case.
+                0
+            }
+            #[cfg(not(miri))]
+            unsafe {
+                libc::ioctl(
+                    fd.as_raw_fd(),
+                    BTRFS_IOC_TREE_SEARCH_V2 as _,
+                    buf.as_mut_ptr(),
+                )
+            }
         } != 0
         {
             return Err(Error::last_os_error());
@@ -292,7 +304,16 @@ impl BtrfsSearch {
             "KERNEL BUG: overran our buffer"
         );
 
-        let (_rest, search) = BtrfsSearch::from_bytes((&buf, 0))?;
+        let (_rest, mut search) = BtrfsSearch::from_bytes((&buf, 0))?;
+        if cfg!(miri) {
+            // When running within Miri, the ioctl is simulated to return successfully without
+            // touching the buffer. The resulting empty result buffer is not a problem and is
+            // expected behaviour, but the kernel would set nr_items to 0. We shouldn't be relying
+            // on this value for safety, but just in case let's overwrite it anyway.
+            //
+            // This is not a #[cfg(miri)] to avoid the "unused mut" warning outside Miri.
+            search.nr_items = 0;
+        }
 
         Ok(BtrfsSearchResults {
             buf,
