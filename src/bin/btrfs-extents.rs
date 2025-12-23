@@ -3,7 +3,7 @@ use std::{
     io::{Error, Result},
     mem::take,
     os::{
-        fd::{AsRawFd, RawFd},
+        fd::{AsFd, AsRawFd, BorrowedFd},
         linux::fs::MetadataExt,
     },
     u32,
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
     let st_ino = stat.st_ino();
 
     let search_args = BtrfsSearch::default().only_extents().for_inode(st_ino);
-    let items = search_args.exec_with_file_size(file.as_raw_fd(), stat.len() as _)?;
+    let items = search_args.exec_with_file_size(file.as_fd(), stat.len() as _)?;
     let nr_items = items.search.nr_items;
     let items = items.collect::<std::result::Result<Vec<_>, _>>()?;
     dbg!(items.len(), nr_items);
@@ -93,7 +93,11 @@ impl BtrfsSearch {
         Self::LEADING_OFFSET + self.result_size() + Self::SENTINEL_SIZE
     }
 
-    fn exec_with_file_size(self, fd: RawFd, file_size: usize) -> Result<BtrfsSearchResults> {
+    fn exec_with_file_size<'fd>(
+        self,
+        fd: BorrowedFd<'fd>,
+        file_size: usize,
+    ) -> Result<BtrfsSearchResults<'fd>> {
         let buf_size = (file_size / (128 * 1024) * self.result_size())
             .max(3 * self.result_size())
             .min(1024_usize.pow(2));
@@ -108,12 +112,40 @@ impl BtrfsSearch {
         self.exec_with_buf(fd, buf)
     }
 
+    /// Execute a search on a BTRFS filesystem.
+    ///
+    /// The BTRFS filesystem is selected using the `fd` argument: that doesn't need to be
+    /// the FD for the file being looked at e.g. with a `for_inode()` lookup, but it's
+    /// convenient for one-off lookups where the file is already opened to obtain its inode.
+    /// It can be useful to set the FD to some stable reference to the filesystem, so that
+    /// lookups for files that are not on that particular filesystem return no results.
+    ///
+    /// The `buf` argument is used both to hold the search request and then for the kernel
+    /// to write results to. It must be appropriately sized: the minimum for the current
+    /// search is available with `minimum_buf_size()`, and `result_size()` can be used to
+    /// size a buffer large enough for the desired amount of results. Note pagination as
+    /// explained below.
+    ///
+    /// This method takes a buffer explicitly so that it can be re-used. The search is
+    /// performed immediately when this method is called, but it may return less than the
+    /// full amount of results available. The iterator will detect that and issue additional
+    /// search calls when reaching the end of results, re-using the buffer each time instead
+    /// of creating new ones internally. You can retrieve the buffer for further re-use once
+    /// done with the iterator, see [BtrfsSearchResults::into_buf()].
+    ///
+    /// Note that the `fd` borrow is passed to the iterator, as it must remain valid so that
+    /// the iterator can execute further searches as required.
+    ///
     /// # Panics
     ///
     /// This method panics when given a buffer smaller than `self.minimum_buf_size()`. The
     /// `exec_with_file_size()` method automatically calculates the required buffer size,
     /// ensuring this panic is not possible, so it's recommended to use it instead of this.
-    fn exec_with_buf(mut self, fd: RawFd, mut buf: Box<[u8]>) -> Result<BtrfsSearchResults> {
+    pub fn exec_with_buf<'fd>(
+        mut self,
+        fd: BorrowedFd<'fd>,
+        mut buf: Box<[u8]>,
+    ) -> Result<BtrfsSearchResults<'fd>> {
         let buf_len = buf.len();
 
         // SAFETY: we must always have enough buffer space for the search key, buf_size u64,
@@ -152,8 +184,16 @@ impl BtrfsSearch {
         // well-behaved: if you pass a bad pointer or undersized buffer, it will tell you so. The
         // kernel only uses this pointer for the duration of the syscall, and we zero the buffer
         // in this function prior to using it, ensuring it's always safe to pass any buffer, as
-        // long as it's appropriately-sized, which is checked above.
-        if unsafe { ioctl(fd, BTRFS_IOC_TREE_SEARCH_V2 as _, buf.as_mut_ptr()) } != 0 {
+        // long as it's appropriately-sized, which is checked above. This function owns the FD,
+        // so it's guaranteed safe to use.
+        if unsafe {
+            ioctl(
+                fd.as_raw_fd(),
+                BTRFS_IOC_TREE_SEARCH_V2 as _,
+                buf.as_mut_ptr(),
+            )
+        } != 0
+        {
             return Err(Error::last_os_error());
         }
 
@@ -171,7 +211,7 @@ impl BtrfsSearch {
             offset: Self::LEADING_OFFSET,
             search,
             next_search_offset: None,
-            fd,
+            fd: Some(fd),
         })
     }
 
@@ -378,16 +418,25 @@ pub struct BtrfsSearchResult {
     pub item: BtrfsSearchResultItem,
 }
 
-#[derive(Debug, Clone)]
-struct BtrfsSearchResults {
+#[derive(Debug)]
+pub struct BtrfsSearchResults<'fd> {
     buf: Box<[u8]>,
     offset: usize,
     search: BtrfsSearch,
     next_search_offset: Option<u64>,
-    fd: RawFd,
+    fd: Option<BorrowedFd<'fd>>,
 }
 
-impl Iterator for BtrfsSearchResults {
+impl BtrfsSearchResults<'_> {
+    /// Destroys this iterator but keep the buffer.
+    ///
+    /// It can be useful to re-use the buffer for another search instead of allocating a new one.
+    pub fn into_buf(self) -> Box<[u8]> {
+        self.buf
+    }
+}
+
+impl Iterator for BtrfsSearchResults<'_> {
     type Item = std::result::Result<BtrfsSearchResult, DekuError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -435,7 +484,9 @@ impl Iterator for BtrfsSearchResults {
         // iterate onwards but reuse the same buffer to avoid reallocating
         let buf = take(&mut self.buf);
         assert_ne!(buf.len(), 0, "BUG: the iterator buffer was take()n twice");
-        match dbg!(self.search.with_offset(off)).exec_with_buf(self.fd, buf) {
+        let fd = take(&mut self.fd).expect("BUG: the iterator fd was take()n twice");
+
+        match dbg!(self.search.with_offset(off)).exec_with_buf(fd, buf) {
             Err(err) => return Some(Err(err.into())),
             Ok(next) => {
                 *self = next;
