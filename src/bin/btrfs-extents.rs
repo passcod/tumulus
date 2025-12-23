@@ -73,6 +73,7 @@ pub struct BtrfsSearch {
 impl BtrfsSearch {
     const SIZE: usize = 104;
     const LEADING_OFFSET: usize = Self::SIZE + 8;
+    const SENTINEL_SIZE: usize = 8; // u64
 
     fn ensure_size() {
         // runtime alternative to the DekuSize approach
@@ -83,9 +84,13 @@ impl BtrfsSearch {
         );
     }
 
-    const fn result_size(self) -> usize {
+    fn result_size(self) -> usize {
         // TODO: compute from self.min_kind through self.max_kind
         BtrfsSearchResultHeader::SIZE + BtrfsFileExtentItem::SIZE
+    }
+
+    fn minimum_buf_size(self) -> usize {
+        Self::LEADING_OFFSET + self.result_size() + Self::SENTINEL_SIZE
     }
 
     fn exec_with_file_size(self, fd: RawFd, file_size: usize) -> Result<BtrfsSearchResults> {
@@ -95,22 +100,69 @@ impl BtrfsSearch {
         // there doesn't appear to be a real limit, but we pick
         // a 1MB maximum to avoid doing too large allocations.
 
-        let buf = vec![0u8; Self::LEADING_OFFSET + dbg!(buf_size)].into_boxed_slice();
+        let box_size = Self::LEADING_OFFSET + buf_size + Self::SENTINEL_SIZE;
+        debug_assert!(box_size >= self.minimum_buf_size());
+
+        // vec![] allocates directly on the heap, avoiding stack overflows for large bufs
+        let buf = vec![0u8; box_size].into_boxed_slice();
         self.exec_with_buf(fd, buf)
     }
 
+    /// # Panics
+    ///
+    /// This method panics when given a buffer smaller than `self.minimum_buf_size()`. The
+    /// `exec_with_file_size()` method automatically calculates the required buffer size,
+    /// ensuring this panic is not possible, so it's recommended to use it instead of this.
     fn exec_with_buf(mut self, fd: RawFd, mut buf: Box<[u8]>) -> Result<BtrfsSearchResults> {
+        let buf_len = buf.len();
+
+        // SAFETY: we must always have enough buffer space for the search key, buf_size u64,
+        // and at least one result header + item + sentinel. From experimentation, passing
+        // shorter buffers doesn't result in UB (it errors cleanly), but better safe than sorry.
+        assert!(
+            buf_len >= self.minimum_buf_size(),
+            "BUG: buffer passed to exec_with_buf is too short (wanted at least {}, got {})",
+            self.minimum_buf_size(),
+            buf_len,
+        );
+
+        // SAFETY: always zero the buffer before using it
+        buf.fill(0);
+
+        // SAFETY: we detect buffer overruns by writing a sentinel value at the back
+        // and giving an 8-byte-smaller buf_size to the kernel, then checking the value
+        // is still there after it's done with it.
+        let sentinel = rand::random::<u64>().to_ne_bytes();
+        debug_assert_eq!(sentinel.len(), Self::SENTINEL_SIZE);
+        buf[(buf_len - Self::SENTINEL_SIZE)..].copy_from_slice(&sentinel[..]);
+
         // clear nr_items (set it to max) so we always grab
         // as many results as the kernel will give us
         self.nr_items = u32::MAX;
         self.to_slice(&mut buf)?;
 
-        let buf_size = (buf.len() - Self::LEADING_OFFSET) as u64;
+        // SAFETY: buf_size passed to the kernel must always be <= the true available space in the box
+        // where available space is what comes immediately after the buf_size u64 and until just before
+        // the sentinel value
+        let buf_size = (buf_len - Self::LEADING_OFFSET - Self::SENTINEL_SIZE) as u64;
         buf[BtrfsSearch::SIZE..Self::LEADING_OFFSET].copy_from_slice(&buf_size.to_ne_bytes()[..]);
 
+        // SAFETY: the general lack of documentation for ioctls and this one in particular makes
+        // validating this usage extremely annoying. Fortunately, the ioctl syscall is relatively
+        // well-behaved: if you pass a bad pointer or undersized buffer, it will tell you so. The
+        // kernel only uses this pointer for the duration of the syscall, and we zero the buffer
+        // in this function prior to using it, ensuring it's always safe to pass any buffer, as
+        // long as it's appropriately-sized, which is checked above.
         if unsafe { ioctl(fd, BTRFS_IOC_TREE_SEARCH_V2 as _, buf.as_mut_ptr()) } != 0 {
             return Err(Error::last_os_error());
         }
+
+        // SAFETY: check the sentinel value before doing anything with the buffer
+        assert_eq!(
+            buf[(buf_len - Self::SENTINEL_SIZE)..],
+            sentinel,
+            "KERNEL BUG: overran our buffer"
+        );
 
         let (_rest, search) = BtrfsSearch::from_bytes((&buf, 0))?;
 
@@ -351,6 +403,8 @@ impl Iterator for BtrfsSearchResults {
             return None;
         }
 
+        // TODO: doing zero-copy interpretation would be nice for perf;
+        // look into if there's something like deku for ergonomics tho
         match BtrfsSearchResult::from_bytes((&buf, 0)) {
             Err(err) => return Some(Err(err)),
             Ok((_rest, result)) => {
@@ -378,9 +432,9 @@ impl Iterator for BtrfsSearchResults {
         }
 
         // we've arrived at the end of our buffer, but there's more data to be had!
-        // iterate onwards but reuse the same buffer (zeroed) to avoid reallocating
-        let mut buf = take(&mut self.buf);
-        buf.fill(0);
+        // iterate onwards but reuse the same buffer to avoid reallocating
+        let buf = take(&mut self.buf);
+        assert_ne!(buf.len(), 0, "BUG: the iterator buffer was take()n twice");
         match dbg!(self.search.with_offset(off)).exec_with_buf(self.fd, buf) {
             Err(err) => return Some(Err(err.into())),
             Ok(next) => {
