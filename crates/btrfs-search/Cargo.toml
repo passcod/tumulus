@@ -1,0 +1,10 @@
+[package]
+name = "btrfs-search"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+deku = { version = "0.20.2", default-features = false, features = ["descriptive-errors", "std"] }
+libc = "0.2.178"
+linux-raw-sys = { version = "0.12.0", features = ["btrfs", "ioctl"] }
+rand = "0.9.2"

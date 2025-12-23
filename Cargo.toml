@@ -1,21 +1,9 @@
-[package]
-name = "tumulus"
-version = "0.0.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = [
+    "crates/btrfs-search",
+    "crates/tumulus",
+]
 
-[dependencies]
-deku = { version = "0.20.2", default-features = false, features = ["descriptive-errors", "std"] }
-diesel = { version = "2.3.5", features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"] }
-diesel-async = { version = "0.7.4", features = ["migrations", "mobc"] }
-diesel-turso = { git = "https://github.com/Choochmeque/diesel_turso", features = ["mobc"] }
-diesel_migrations = "2.3.1"
-facet = { version = "0.32.3", features = ["uuid", "jiff02"] }
-facet-format-json = "0.32.3"
-jiff = "0.2.16"
-libc = "0.2.178"
-linux-raw-sys = { version = "0.12.0", features = ["btrfs", "ioctl"] }
-miette = { version = "7.6.0", features = ["fancy"] }
-mobc = "0.9.0"
-rand = "0.9.2"
-tokio = { version = "1.48.0", features = ["full"] }
-uuid = { version = "1.19.0", features = ["v4", "serde"] }
+[workspace.dependencies]
+btrfs-search = { version = "0.0.0", path = "crates/btrfs-search" }

@@ -1,6 +1,6 @@
 use std::fs::File;
 
-use tumulus::btrfs_search::BtrfsSearch;
+use btrfs_search::BtrfsSearch;
 
 fn main() -> std::io::Result<()> {
     BtrfsSearch::ensure_size();

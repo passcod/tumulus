@@ -24,9 +24,10 @@ where
     DB: diesel::backend::Backend,
     String: ToSql<Text, DB>,
 {
-    fn to_sql(&self, out: &mut Output<DB>) -> serialize::Result {
-        let s = self.0.to_string();
-        s.to_sql(out)
+    fn to_sql(&self, _out: &mut Output<DB>) -> serialize::Result {
+        todo!()
+        // let s = self.0.to_string();
+        // s.to_sql(out)
     }
 }
 
