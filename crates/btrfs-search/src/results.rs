@@ -49,19 +49,23 @@ impl Iterator for BtrfsSearchResults<'_> {
         if buf.is_empty() {
             // should not happen (should be caught by other bits)
             // but let's handle it anyway to make sure
+            debug_assert!(!buf.is_empty(), "should not happen");
             return None;
         }
 
         // TODO: doing zero-copy interpretation would be nice for perf;
         // look into if there's something like deku for ergonomics tho
         match BtrfsSearchResult::from_bytes((&buf, 0)) {
-            Err(err) => return Some(Err(err)),
+            Err(err) => {
+                return Some(Err(err));
+            }
             Ok((_rest, result)) => {
                 // kind is never None in legitimate output, so we have to assume
                 // we're reading unitialised space. don't interpret it as anything!
                 if result.header.kind != BtrfsSearchKind::None {
                     self.offset += BtrfsSearchResultHeader::SIZE + result.item.len();
                     self.next_search_offset = Some(result.header.offset + 1);
+                    self.search.nr_items = self.search.nr_items.saturating_sub(1);
                     return Some(Ok(result));
                 }
             }
@@ -70,6 +74,7 @@ impl Iterator for BtrfsSearchResults<'_> {
         let Some(off) = self.next_search_offset else {
             // should not happen (should be caught by other bits)
             // but let's handle it anyway to make sure
+            debug_assert!(self.next_search_offset.is_none(), "should not happen");
             return None;
         };
 
@@ -87,7 +92,9 @@ impl Iterator for BtrfsSearchResults<'_> {
         let fd = take(&mut self.fd).expect("BUG: the iterator fd was take()n twice");
 
         match self.search.offset(off).with_buf(fd, buf) {
-            Err(err) => return Some(Err(err.into())),
+            Err(err) => {
+                return Some(Err(err.into()));
+            }
             Ok(next) => {
                 *self = next;
 

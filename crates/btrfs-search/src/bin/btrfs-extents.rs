@@ -3,6 +3,7 @@ use std::fs::File;
 use btrfs_search::BtrfsSearch;
 
 fn main() -> std::io::Result<()> {
+    karen::pkexec().unwrap();
     BtrfsSearch::ensure_size();
 
     let path = std::env::args().nth(1).expect("USAGE: btrfs-extents PATH");

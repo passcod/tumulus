@@ -134,7 +134,7 @@ impl BtrfsSearch {
         // there doesn't appear to be a real limit, but we pick
         // a 1MB maximum to avoid doing too large allocations.
 
-        dbg!(search).with_buf_size(file.as_fd(), buf_size)
+        search.with_buf_size(file.as_fd(), buf_size)
     }
 
     /// Execute a search on a BTRFS filesystem.
