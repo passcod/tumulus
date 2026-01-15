@@ -339,6 +339,7 @@ impl BtrfsSearch {
         Ok(BtrfsSearchResults {
             buf,
             offset: Self::LEADING_OFFSET,
+            items_remaining_in_buf: search.nr_items,
             search,
             next_search_offset: None,
             fd: Some(fd),
