@@ -128,11 +128,18 @@ impl BtrfsSearch {
             .kinds(&[BtrfsSearchKind::ExtentData])
             .objects(&[st_ino]);
 
+        // the upper limit is hardcoded to 16MB here:
+        // https://github.com/torvalds/linux/blob/master/fs/btrfs/ioctl.c#L1705
+        // but we set a 1MB maximum to avoid doing too large allocations.
+        //
+        // also, experimentally setting this to <=1512 sometimes returns EOVERFLOW,
+        // so we set the lower bound to 2kB to just guarantee we're good for it
+        //
+        // in between, calculate from file_size
         let buf_size = (file_size / (128 * 1024) * search.result_size())
             .max(3 * search.result_size())
+            .max(2048)
             .min(1024_usize.pow(2));
-        // there doesn't appear to be a real limit, but we pick
-        // a 1MB maximum to avoid doing too large allocations.
 
         search.with_buf_size(file.as_fd(), buf_size)
     }
@@ -162,6 +169,9 @@ impl BtrfsSearch {
     ///
     /// Note that the `fd` borrow is passed to the iterator, as it must remain valid so that
     /// the iterator can execute further searches as required.
+    ///
+    /// Experimentally, you should consider a 2kB lower bound for the `buf_size`. Going smaller is
+    /// possible, but may lead to EOVERFLOW errors from the kernel.
     ///
     /// # Panics
     ///
@@ -239,6 +249,9 @@ impl BtrfsSearch {
     /// Note that the `fd` borrow is passed to the iterator, as it must remain valid so that the
     /// iterator can execute further searches as required.
     ///
+    /// Experimentally, you should consider a 2kB lower bound for the buffer size. Going smaller is
+    /// possible, but may lead to EOVERFLOW errors from the kernel.
+    ///
     /// When allocating a buffer, you should use something like this to avoid running into
     /// stack overflows at large buffer sizes (`vec![]` is specially constructed to allocate
     /// directly onto the heap):
@@ -256,6 +269,9 @@ impl BtrfsSearch {
         mut buf: Box<[u8]>,
     ) -> Result<BtrfsSearchResults<'fd>> {
         let buf_len = buf.len();
+
+        // FIXME: can we use .get_mut() / .get() instead of [] in this?
+        // current should be safe, but eliminating potential panics is good?
 
         // SAFETY: we must always have enough buffer space for the search key, buf_size u64,
         // at least one result header + item, and the sentinel. From experimentation, passing
