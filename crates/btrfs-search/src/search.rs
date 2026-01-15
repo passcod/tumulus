@@ -79,8 +79,8 @@ impl BtrfsSearch {
     /// sizes. It should be used to calculate how large a buffer to allocate.
     pub fn result_size(self) -> usize {
         let mut max_item_size = 0;
-        for key in
-            self.min_kind.min(BtrfsSearchKind::MAX_KEY)..self.max_kind.min(BtrfsSearchKind::MAX_KEY)
+        for key in self.min_kind.max(BtrfsSearchKind::MIN_KEY)
+            ..=self.max_kind.min(BtrfsSearchKind::MAX_KEY)
         {
             let kind = BtrfsSearchKind::from_key(key);
             max_item_size = max_item_size.max(kind.item_size());
