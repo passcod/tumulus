@@ -35,6 +35,10 @@ impl BtrfsSearchResultHeader {
 
 pub(crate) trait SizedItem {
     const SIZE: usize;
+
+    fn actual_len(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,7 +164,7 @@ macro_rules! kinds {
             pub(crate) fn len(&self) -> usize {
                 match self {
                     $(
-                        Self::$itemvar(_) => <$item as SizedItem>::SIZE,
+                        Self::$itemvar(item) => item.actual_len().unwrap_or(<$item as SizedItem>::SIZE),
                     )*
                     Self::Other(data) => data.len(),
                 }

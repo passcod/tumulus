@@ -14,6 +14,13 @@ impl super::SizedItem for BtrfsFileExtentItem {
     // and that can be changed at runtime! with the max_inline mount option
     // so we set it to 4096 (the full size of a block) to be extra safe
     const SIZE: usize = 4096;
+
+    fn actual_len(&self) -> Option<usize> {
+        Some(match &self.body {
+            BtrfsFileExtentItemBody::OnDisk(_) => 53,
+            BtrfsFileExtentItemBody::Inline(buf) => 21 + buf.len(),
+        })
+    }
 }
 
 /// Common metadata for file extent items.
