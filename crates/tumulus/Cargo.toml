@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
+blake3 = "1.8.3"
 btrfs-search.workspace = true
 diesel = { version = "2.3.5", features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"] }
 diesel-async = { version = "0.7.4", features = ["migrations", "mobc"] }
@@ -12,6 +13,7 @@ diesel_migrations = "2.3.1"
 facet = { version = "0.32.3", features = ["uuid", "jiff02"] }
 facet-format-json = "0.32.3"
 jiff = "0.2.16"
+karen = "0.1.2"
 miette = { version = "7.6.0", features = ["fancy"] }
 mobc = "0.9.0"
 tokio = { version = "1.48.0", features = ["full"] }
