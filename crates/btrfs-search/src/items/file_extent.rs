@@ -100,6 +100,7 @@ impl<'a> DekuReader<'a, (BtrfsExtentKind, u64)> for BtrfsFileExtentItemBody {
     {
         match kind {
             BtrfsExtentKind::Inline => {
+                // the `as _` doesn't matter because this will always be a small number (<4kB)
                 DekuReader::from_reader_with_ctx(reader, ReadExact(ram_bytes as _))
                     .map(Self::Inline)
             }
