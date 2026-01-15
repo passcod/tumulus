@@ -51,7 +51,6 @@ impl Iterator for BtrfsSearchResults<'_> {
             return None;
         }
 
-        // there's some cases items_remaining is zero, but there's more data to get.
         if self.items_remaining_in_buf > 0 {
             let buf = self.buf.get(self.offset..).unwrap_or_default();
             if buf.is_empty() {
@@ -122,6 +121,8 @@ impl Iterator for BtrfsSearchResults<'_> {
 
         match self.search.offset(off).with_buf(fd, buf) {
             Err(err) => {
+                // if we fail the fetch, we may be able to retry again, leave the decision to the caller.
+                // but a caller should note that if errors aren't handled, an error here will probably spin
                 return Some(Err(err.into()));
             }
             Ok(next) => {
