@@ -15,6 +15,7 @@ fn main() -> std::io::Result<()> {
     let path = std::env::args().nth(1).expect("USAGE: debug-extents PATH");
     let file = File::open(&path)?;
     let mut seeker = File::open(&path)?;
+    let mut file_hash = blake3::Hasher::new();
 
     let mut start = 0;
     for item in BtrfsSearch::extents_for_file(&file)? {
@@ -51,7 +52,10 @@ fn main() -> std::io::Result<()> {
 
                 let mut hash = blake3::Hasher::new();
                 seeker.seek(std::io::SeekFrom::Start(start as _))?;
-                hash.update_reader(seeker.by_ref().take(size as _))?;
+                let mut segment = seeker.by_ref().take(size as _);
+                file_hash.update_reader(segment.by_ref())?;
+                segment.rewind()?;
+                hash.update_reader(segment)?;
                 println!("hash={}", hash.finalize().to_hex());
 
                 start = start + size;
@@ -59,6 +63,12 @@ fn main() -> std::io::Result<()> {
             Ok(item) => eprintln!("unexpected item in search: {:?}", item.header.kind),
         }
     }
+
+    println!(
+        "file\tsize={start}\ttrue={}\thash={}",
+        file.metadata()?.len(),
+        file_hash.finalize().to_hex()
+    );
 
     Ok(())
 }
