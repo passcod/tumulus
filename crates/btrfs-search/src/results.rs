@@ -63,9 +63,13 @@ impl Iterator for BtrfsSearchResults<'_> {
                 // kind is never None in legitimate output, so we have to assume
                 // we're reading unitialised space. don't interpret it as anything!
                 if result.header.kind != BtrfsSearchKind::None {
+                    // this is what is actually used to continue the read
                     self.offset += BtrfsSearchResultHeader::SIZE + result.item.len();
                     self.next_search_offset = Some(result.header.offset + 1);
+
+                    // this is used to know when to stop
                     self.search.nr_items = self.search.nr_items.saturating_sub(1);
+
                     return Some(Ok(result));
                 }
             }
