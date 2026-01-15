@@ -138,7 +138,6 @@ impl BtrfsSearch {
         // in between, calculate from file_size
         let buf_size = (file_size / (128 * 1024) * search.result_size())
             .max(3 * search.result_size())
-            .max(2048)
             .min(1024_usize.pow(2));
 
         search.with_buf_size(file.as_fd(), buf_size)
@@ -169,9 +168,6 @@ impl BtrfsSearch {
     ///
     /// Note that the `fd` borrow is passed to the iterator, as it must remain valid so that
     /// the iterator can execute further searches as required.
-    ///
-    /// Experimentally, you should consider a 2kB lower bound for the `buf_size`. Going smaller is
-    /// possible, but may lead to EOVERFLOW errors from the kernel.
     ///
     /// # Panics
     ///
@@ -248,9 +244,6 @@ impl BtrfsSearch {
     ///
     /// Note that the `fd` borrow is passed to the iterator, as it must remain valid so that the
     /// iterator can execute further searches as required.
-    ///
-    /// Experimentally, you should consider a 2kB lower bound for the buffer size. Going smaller is
-    /// possible, but may lead to EOVERFLOW errors from the kernel.
     ///
     /// When allocating a buffer, you should use something like this to avoid running into
     /// stack overflows at large buffer sizes (`vec![]` is specially constructed to allocate
