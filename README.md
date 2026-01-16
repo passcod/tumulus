@@ -7,17 +7,16 @@ possible, the catalog should be built from a read-only snapshot.
 The catalog has three design goals:
 
 - be readable and writeable on any platform
-- be maximally efficient when running on BTRFS (or similar)
 - require no client-side long-term caching of data
+- be constructible entirely offline
 
-The idea of the catalog-tree-file-blob-extent structure is deliberate mimicry of BTRFS. The catalog
-should be able to be built by reading the extent metadata of every file in a BTRFS tree, encoding
-the details, and then uploading the extents. That is, instead of doing our own chunking, we let the
+The catalog should be able to be built by reading the extent metadata of every file, encoding the
+details, and then uploading the extents. That is, instead of doing our own chunking, we let the
 filesystem do it. Additionally, at restore time, if we see a file with matching extents to what we
-are trying to restore, we can directly reference the existing BTRFS extents instead of downloading
-and writing the actual data.
+are trying to restore, we can directly reference the existing extents instead of downloading and
+writing the actual data.
 
-A catalog is expected to be less than 0.5% of the size of the data it's referencing, even with very
+A catalog is expected to be less than 1.5% of the size of the data it's referencing, even with very
 high amounts of files and fragmentation of said files.
 
 `fs_` fields are filled in when possible but are not required for the catalog to function; they are
@@ -43,7 +42,7 @@ Optional keys:
 - `started`: when the process of creating the catalog started
 - `fs_type`: type of filesystem
 - `fs_id`: UUID of the filesystem
-- `from_writeable`: present and `true` if the catalog was created from a writeable tree
+- `fs_writeable`: present and `true` if the catalog was created from a writeable tree
 - Any other arbitrary data, prefixed with `extra.`
 
 ### `extents` table
@@ -51,10 +50,7 @@ Optional keys:
 Columns:
 
 - `extent_id` (blob) primary key: BLAKE3 hash of the contents
-- `bytes` (integer): size of the extent in bytes
-- `fs_object_id` (integer, optional): in BTRFS, the object ID of the extent
-- `fs_checksum_type` (integer, optional): in BTRFS, the `csum_type`
-- `fs_checksum` (blob, optional): in BTRFS, the `csum`
+- `bytes` (unsigned integer, non zero): size of the extent in bytes
 
 Indexes:
 
@@ -65,24 +61,26 @@ Indexes:
 Columns:
 
 - `blob_id` (blob)
-- `extent_id` (blob)
-- `offset` (integer): offset in bytes
-- `bytes` (integer): size of the extent in bytes
+- `extent_id` (blob, nullable): if null, this part of the blob is sparse
+- `offset` (unsigned integer): offset in bytes
+- `bytes` (unsigned integer): size of the extent in bytes
+
+A sparse extent is not stored, and reading it would return zeroes.
+It's illegal to have `bytes = 0` and `extent_id` not null.
 
 Indexes:
 
 - `blob_id`
 - `extent_id`
-- `(blob_id, extent_id)` primary key
-- `(blob_id, offset)`
+- `(blob_id, offset)` primary key
 
 ### `blobs` table
 
 Columns:
 
 - `blob_id` (blob): BLAKE3 hash of the extent map (described below)
-- `bytes` (integer): total size in bytes of the blob
-- `extents` (integer): amount of extents in this blob
+- `bytes` (unsigned integer): total size in bytes of the blob
+- `extents` (unsigned integer): amount of extents in this blob
 
 Indexes:
 
@@ -100,10 +98,10 @@ Columns:
 - `ts_modified` (date, optional)
 - `ts_accessed` (date, optional)
 - `attributes` (jsonb, optional)
-- `unix_mode` (integer, optional)
-- `unix_owner_id` (integer, optional)
+- `unix_mode` (unsigned integer, optional)
+- `unix_owner_id` (unsigned integer, optional)
 - `unix_owner_name` (text, optional)
-- `unix_group_id` (integer, optional)
+- `unix_group_id` (unsigned integer, optional)
 - `unix_group_name` (text, optional)
 - `special` (jsonb, optional): if this is a special file (symlink, hardlink, device, etc), this info
 - `fs_inode` (integer, optiona): the inode of the file on the machine
@@ -122,25 +120,24 @@ Indexes:
 
 This is how the data is stored on the server (which is generally an object store like S3).
 
-- `extents/ab/cd/ef9134ab509048b78cfe6f444215`: the actual data
-- `blobs/ab/cd/ef6a38ed9a50922d3db39ecfb1c4`: extent map for this blob
-- `catalogs/10/b6/6bbfeb4e4a3bbe02986ff6c5e28f`: the actual sqlite catalog file
+- `extents/abcdef9134ab509048b78cfe6f444215`: the actual data
+- `blobs/abcdef6a38ed9a50922d3db39ecfb1c4`: extent map for this blob
+- `catalogs/10b66bbfeb4e4a3bbe02986ff6c5e28f`: the actual sqlite catalog file
 - `catalog.idx`: sqlite file containing best-effort indexes of catalog metadata and tree hashes to IDs
+
+If the server storage is a filesystem, the IDs may be split at byte boundaries to shard into
+smaller directories, e.g. `extents/ab/cd/ef9134ab509048b78cfe6f444215`. The storage layer is
+responsible for this and must not expose the sharded layout to the common logic.
 
 ### Extent data
 
 This is the raw data.
 
+Sparse and zero-sized extents are not stored (do not exist in the server storage).
+
 In storage backends that support metadata, that may indicate a content type which indicates that
 the stored extent is actually compressed. The extent ID must always be the hash of the uncompressed
 content. If there's no support for that sideband metadata, the extent must always be uncompressed.
-
-Path shape:
-
-- `extents`
-- first byte of ID
-- second byte of ID
-- remaining bytes of ID
 
 The ID is a BLAKE3 hash of the contents, lowercase hex encoded.
 
@@ -150,7 +147,7 @@ The ID is a BLAKE3 hash of the contents, lowercase hex encoded.
 
 This is how actual file contents are described. Files are zero or one blobs. Blobs are one or more
 extents. Zero-sized blobs are not special, but if you see the zero-size blob ID you can skip
-actually reading it; it does exist, though, if you have a zero-sized file in your data.
+actually reading it; it does exist, though (if you have a zero-sized file in your data).
 
 Header:
 
@@ -185,22 +182,11 @@ thus we can skip writing (and uploading) all the data.
 _Technically_ if you actually had the tree data, you could take it and restore the snapshot, but you
 would have lost all special files and all of the metadata except filenames.
 
-Header:
-
-- 1 byte: version (0x01)
-- 1 byte: size of the blob ID (0x20) (H)
-- 8 bytes (u64 LE): total size of the all files in the tree
-- 8 bytes (u64 LE): total size of the all blobs in the tree
-- 8 bytes (u64 LE): amount of files in the tree (N)
-- 8 bytes (u64 LE): amount of blobs in the tree
-
-Map (repeated N times):
+The tree data is a byte-wise sorted list with each item being:
 
 - 4 bytes (u32 LE): size of the filepath (P)
 - P bytes: filepath in bytes with unix slashes
 - H bytes: blob ID
-
-Map is _sorted_ byte-wise by the byte content of each entry.
 
 Files that don't have any content (not zero-sized files, but special files like links) are not
 listed in the tree map, since it's only used to cheaply skip writing any extent data.
@@ -208,13 +194,6 @@ listed in the tree map, since it's only used to cheaply skip writing any extent 
 ### Catalog files
 
 The internal structure of the files is described in the "Snapshot Catalog" section above.
-
-Path shape:
-
-- `catalogs`
-- first byte of the catalog ID
-- second byte of the catalog ID
-- remaining bytes of the catalog ID
 
 The ID is a UUID in lowercase hex without any punctuation.
 
@@ -240,3 +219,4 @@ Metadata has keys:
 
 And `catalogs` has a btree index for every column, which is the real indexing part.
 
+This file is "best-effort": it is not guaranteed that it represents the current state of the store.
