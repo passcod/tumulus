@@ -30,6 +30,7 @@ pub struct FiemapLookup {
 
 /// A request to the FIEMAP ioctl.
 #[derive(Debug, Copy, Clone, FromBytes, IntoBytes, KnownLayout, Immutable)]
+#[repr(C)]
 pub(crate) struct FiemapRequest {
     /// Byte offset (inclusive) at which to start mapping.
     pub start: u64,
@@ -51,6 +52,7 @@ pub(crate) struct FiemapRequest {
 }
 
 #[derive(Debug, Clone, FromBytes, IntoBytes, KnownLayout, Immutable)]
+#[repr(C)]
 pub struct FiemapExtent {
     /// Byte offset of the extent in the file.
     pub logical_offset: u64,
