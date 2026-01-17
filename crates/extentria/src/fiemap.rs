@@ -450,7 +450,7 @@ impl<'f> Iterator for FiemapSearchResults<'f> {
         if self.items_remaining_in_buf > 0 {
             let buf = self
                 .buf
-                .get(dbg!(self.offset..=(self.offset + result_size())))
+                .get(dbg!(self.offset..(self.offset + result_size())))
                 .unwrap_or_default();
             dbg!(buf.len());
             if buf.is_empty() {
