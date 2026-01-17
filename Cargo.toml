@@ -2,8 +2,10 @@
 resolver = "3"
 members = [
     "crates/btrfs-search",
+    "crates/extentria",
     "crates/tumulus",
 ]
 
 [workspace.dependencies]
 btrfs-search = { version = "0.0.0", path = "crates/btrfs-search" }
+extentria = { version = "0.0.0", path = "crates/extentria" }
