@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use lloggs::LoggingArgs;
-use rusqlite::Connection;
 use tracing::info;
+
+use tumulus::open_catalog;
 
 #[derive(Parser, Debug)]
 #[command(name = "compare-catalogs")]
@@ -33,8 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!(?local_path, ?remote_path, "Comparing catalogs");
 
-    let local_conn = Connection::open(local_path)?;
-    let remote_conn = Connection::open(remote_path)?;
+    // Open catalogs (automatically decompresses if needed)
+    let (local_conn, _local_tempfile) = open_catalog(local_path)?;
+    let (remote_conn, _remote_tempfile) = open_catalog(remote_path)?;
 
     // Get local catalog stats
     let local_extent_count: i64 =
@@ -62,9 +64,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     eprintln!();
 
     // Attach remote database to local connection for comparison
+    // Use the actual file path (which may be a tempfile if compressed)
+    let remote_db_path = _remote_tempfile
+        .as_ref()
+        .map(|t| t.path().to_path_buf())
+        .unwrap_or_else(|| remote_path.clone());
     local_conn.execute(
         "ATTACH DATABASE ?1 AS remote",
-        [remote_path.to_string_lossy().as_ref()],
+        [remote_db_path.to_string_lossy().as_ref()],
     )?;
 
     // Find extents in local that are not in remote

@@ -4,12 +4,17 @@
 //! tracking file extents, blobs, and metadata in a SQLite database.
 
 pub mod catalog;
+pub mod compression;
 pub mod extents;
 pub mod file;
 pub mod machine;
 pub mod tree;
 
 pub use catalog::{CatalogStats, create_catalog_schema, write_catalog};
+pub use compression::{
+    DEFAULT_COMPRESSION_LEVEL, compress_catalog_in_place, compress_file, decompress_file,
+    is_zstd_compressed, open_catalog,
+};
 pub use extents::{BlobInfo, ExtentInfo, detect_sparse_holes, process_file_extents};
 pub use file::{FileInfo, process_file};
 pub use machine::get_machine_id;

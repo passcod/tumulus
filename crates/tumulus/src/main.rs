@@ -11,7 +11,8 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use tumulus::{
-    FileInfo, compute_tree_hash, create_catalog_schema, get_machine_id, process_file, write_catalog,
+    DEFAULT_COMPRESSION_LEVEL, FileInfo, compression::compress_file_with_level, compute_tree_hash,
+    create_catalog_schema, get_machine_id, process_file, write_catalog,
 };
 
 #[derive(Parser, Debug)]
@@ -27,6 +28,10 @@ struct Args {
     /// Make extent read errors fatal (exit on first error)
     #[arg(long, short = 'e')]
     fatal_errors: bool,
+
+    /// Zstd compression level (0 to disable, 1-22 for compression)
+    #[arg(long, short = 'c', default_value_t = DEFAULT_COMPRESSION_LEVEL)]
+    compression: i32,
 
     #[command(flatten)]
     logging: LoggingArgs,
@@ -134,6 +139,19 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Write catalog data
     let stats = write_catalog(&conn, &file_infos)?;
+
+    // Close the connection before compressing
+    drop(conn);
+
+    // Compress the catalog file
+    if args.compression > 0 {
+        info!(level = args.compression, "Compressing catalog");
+        let temp_output = tempfile::NamedTempFile::new_in(
+            catalog_path.parent().unwrap_or(std::path::Path::new(".")),
+        )?;
+        compress_file_with_level(catalog_path, temp_output.path(), args.compression)?;
+        temp_output.persist(catalog_path)?;
+    }
 
     info!(?catalog_path, "Catalog written");
     eprintln!("Catalog written to {:?}", catalog_path);
