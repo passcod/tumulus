@@ -342,14 +342,14 @@ impl FiemapLookup {
             u32::try_from((buf_len - request_size()) / result_size()).unwrap_or(u32::MAX);
         debug_assert_ne!(array_size, 0);
 
-        dbg!(FiemapRequest {
+        FiemapRequest {
             start: self.start,
             length: self.length,
             flags: self.flags,
             _reserved: 0,
             written: 0,
             array_size,
-        })
+        }
         .write_to_prefix(&mut buf)
         .map_err(|err| std::io::Error::other(err.to_string()))?;
 
@@ -382,13 +382,6 @@ impl FiemapLookup {
 
         debug_assert_eq!(buf.len().saturating_sub(rest.len()), request_size());
 
-        dbg!(
-            response,
-            format!("{buf:x?}"),
-            buf.len(),
-            rest.len(),
-            request_size()
-        );
         Ok(FiemapSearchResults {
             buf,
             offset: request_size(),
@@ -450,11 +443,7 @@ impl<'f> Iterator for FiemapSearchResults<'f> {
         }
 
         if self.items_remaining_in_buf > 0 {
-            let buf = self
-                .buf
-                .get(dbg!(self.offset..(self.offset + result_size())))
-                .unwrap_or_default();
-            dbg!(buf.len());
+            let buf = self.buf.get(self.offset..).unwrap_or_default();
             if buf.is_empty() {
                 // should not happen (should be caught by other bits)
                 // but let's handle it anyway to make sure
@@ -462,8 +451,8 @@ impl<'f> Iterator for FiemapSearchResults<'f> {
                 return None;
             }
 
-            match FiemapExtent::ref_from_bytes(buf) {
-                Ok(result) => {
+            match FiemapExtent::ref_from_prefix(buf) {
+                Ok((result, _)) => {
                     // this is what is actually used to continue the read
                     self.offset += result_size();
 

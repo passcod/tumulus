@@ -19,7 +19,7 @@ fn main() -> std::io::Result<()> {
             Ok(extent) => {
                 print!(
                     "extent start={:7}\tend={:7}\tsize={:7}\tflags={}\t",
-                    dbg!(extent).logical_offset,
+                    extent.logical_offset,
                     extent.logical_offset + extent.length,
                     extent.length,
                     [
