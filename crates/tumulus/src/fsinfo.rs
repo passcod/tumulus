@@ -2,12 +2,28 @@
 //!
 //! Provides functions to get filesystem type, UUID, and hostname.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
+use nix::libc;
 use nix::sys::statfs::statfs;
+
+/// BTRFS ioctl magic number
+const BTRFS_IOCTL_MAGIC: u8 = 0x94;
+
+/// BTRFS_IOC_SUBVOL_GETFLAGS = _IOR(0x94, 25, u64)
+/// Formula: (2 << 30) | (type << 8) | nr | (size << 16)
+const BTRFS_IOC_SUBVOL_GETFLAGS: libc::c_ulong =
+    (2 << 30) | ((BTRFS_IOCTL_MAGIC as libc::c_ulong) << 8) | 25 | (8 << 16);
+
+/// BTRFS subvolume read-only flag
+const BTRFS_SUBVOL_RDONLY: u64 = 1 << 1;
+
+/// BTRFS filesystem magic number
+const BTRFS_SUPER_MAGIC: u64 = 0x9123683E;
 
 /// Information about a filesystem.
 #[derive(Debug, Clone)]
@@ -144,13 +160,47 @@ fn get_fs_uuid(path: &Path) -> io::Result<Option<String>> {
     Ok(None)
 }
 
-/// Check if a path is on a read-only filesystem.
+/// Check if a path is on a read-only filesystem or btrfs read-only snapshot.
+///
+/// This checks both the mount flags (ST_RDONLY) and, for btrfs filesystems,
+/// the subvolume read-only property which is used for read-only snapshots.
 pub fn is_readonly(path: &Path) -> io::Result<bool> {
-    let stat = statfs(path).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let stat = statfs(path).map_err(|e| io::Error::other(e))?;
 
-    // Check if ST_RDONLY flag is set
-    // The flags field contains mount flags
-    Ok(stat.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY))
+    // Check if ST_RDONLY mount flag is set
+    if stat.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY) {
+        return Ok(true);
+    }
+
+    // For btrfs, also check the subvolume read-only flag
+    if stat.filesystem_type().0 as u64 == BTRFS_SUPER_MAGIC {
+        if let Ok(readonly) = is_btrfs_subvol_readonly(path) {
+            return Ok(readonly);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Check if a btrfs subvolume is marked read-only.
+///
+/// This uses the BTRFS_IOC_SUBVOL_GETFLAGS ioctl to check the subvolume's
+/// read-only property, which is set on read-only snapshots.
+fn is_btrfs_subvol_readonly(path: &Path) -> io::Result<bool> {
+    let file = File::open(path)?;
+    let fd = file.as_raw_fd();
+
+    let mut flags: u64 = 0;
+
+    // SAFETY: We're calling ioctl with a valid fd and a pointer to a u64.
+    // The ioctl reads flags into the provided buffer.
+    let result = unsafe { libc::ioctl(fd, BTRFS_IOC_SUBVOL_GETFLAGS, &mut flags as *mut u64) };
+
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok((flags & BTRFS_SUBVOL_RDONLY) != 0)
 }
 
 #[cfg(test)]
