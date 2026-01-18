@@ -3,7 +3,6 @@ use std::{
     io::{Error, Result},
     mem::{take, transmute},
     os::fd::{AsFd, AsRawFd, BorrowedFd},
-    u32, u64,
 };
 
 use linux_raw_sys::ioctl::{
@@ -73,47 +72,47 @@ pub struct FiemapExtent {
 
 impl FiemapExtent {
     pub fn last(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_LAST == 1
+        self.flags & FIEMAP_EXTENT_LAST != 0
     }
 
     pub fn location_unknown(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_UNKNOWN == 1
+        self.flags & FIEMAP_EXTENT_UNKNOWN != 0
     }
 
     pub fn delayed_allocation(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_DELALLOC == 1
+        self.flags & FIEMAP_EXTENT_DELALLOC != 0
     }
 
     pub fn encoded(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_ENCODED == 1
+        self.flags & FIEMAP_EXTENT_ENCODED != 0
     }
 
     pub fn encrypted(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_DATA_ENCRYPTED == 1
+        self.flags & FIEMAP_EXTENT_DATA_ENCRYPTED != 0
     }
 
     pub fn not_aligned(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_NOT_ALIGNED == 1
+        self.flags & FIEMAP_EXTENT_NOT_ALIGNED != 0
     }
 
     pub fn inline(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_DATA_INLINE == 1
+        self.flags & FIEMAP_EXTENT_DATA_INLINE != 0
     }
 
     pub fn packed(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_DATA_TAIL == 1
+        self.flags & FIEMAP_EXTENT_DATA_TAIL != 0
     }
 
     pub fn unwritten(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_UNWRITTEN == 1
+        self.flags & FIEMAP_EXTENT_UNWRITTEN != 0
     }
 
     pub fn simulated(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_MERGED == 1
+        self.flags & FIEMAP_EXTENT_MERGED != 0
     }
 
     pub fn shared(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_SHARED == 1
+        self.flags & FIEMAP_EXTENT_SHARED != 0
     }
 }
 
@@ -466,7 +465,9 @@ impl<'f> Iterator for FiemapSearchResults<'f> {
                     }
 
                     // SAFETY: honestly this one I'm unsure about
-                    return Some(Ok(unsafe { transmute(result) }));
+                    return Some(Ok(unsafe {
+                        transmute::<&FiemapExtent, &'f FiemapExtent>(result)
+                    }));
                 }
                 Err(err) => {
                     // if we fail the parse, we can't safely go forward on this page
@@ -505,14 +506,14 @@ impl<'f> Iterator for FiemapSearchResults<'f> {
             Err(err) => {
                 // if we fail the fetch, we may be able to retry again, leave the decision to the caller.
                 // but a caller should note that if errors aren't handled, an error here will probably spin
-                return Some(Err(err.into()));
+                Some(Err(err))
             }
             Ok(next) => {
                 *self = next;
 
                 // recursing in an iterator is not great, but this will be limited:
                 // it will either return None or Some and should not itself recurse
-                return self.next();
+                self.next()
             }
         }
     }

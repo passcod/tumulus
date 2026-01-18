@@ -4,7 +4,21 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2.178"
+
+[target.'cfg(target_os = "linux")'.dependencies]
 linux-raw-sys = { version = "0.12.0", features = ["ioctl"] }
 zerocopy = { version = "0.8.33", features = ["simd", "std"] }
 zerocopy-derive = "0.8.33"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Foundation",
+] }
+
+[dev-dependencies]
+tempfile = "3"

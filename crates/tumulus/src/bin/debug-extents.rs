@@ -1,13 +1,11 @@
-use std::{convert::identity, fs::File, io, path::PathBuf};
+use std::{fs::File, io, path::PathBuf};
 
 use clap::Parser;
-use extentria::fiemap::FiemapLookup;
+use extentria::{RangeReader, can_detect_shared};
 use lloggs::LoggingArgs;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use tracing::{debug, error, info, warn};
-
-use tumulus::extents::detect_sparse_holes;
 
 #[derive(Parser, Debug)]
 #[command(name = "debug-extents")]
@@ -65,98 +63,60 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
     let mmap = unsafe { Mmap::map(&file)? };
     let file_len = mmap.len();
 
-    // Get extent information from FIEMAP and compute hashes
-    // Collect extents until we hit an error, then stop but keep what we have
-    let mut raw_extents: Vec<(u64, u64, [u8; 32], String)> = Vec::new();
+    // Get extent information using cross-platform API
+    let mut reader = RangeReader::new();
+    let mut extent_displays: Vec<ExtentDisplay> = Vec::new();
     let mut extent_read_error: Option<io::Error> = None;
 
-    for result in FiemapLookup::extents_for_file(&file)? {
-        match result {
-            Ok(extent) => {
-                let start = (extent.logical_offset as usize).min(file_len);
-                let end = (start + extent.length as usize).min(file_len);
-                let slice = &mmap[start..end];
-                let extent_id = *blake3::hash(slice).as_bytes();
+    match reader.read_ranges(&file) {
+        Ok(range_iter) => {
+            for result in range_iter {
+                match result {
+                    Ok(range) => {
+                        if range.flags.sparse {
+                            extent_displays.push(ExtentDisplay {
+                                logical_offset: range.offset,
+                                length: range.length,
+                                flags: "sparse".to_string(),
+                                is_sparse: true,
+                                hash: None,
+                                bytes_read: 0,
+                            });
+                        } else {
+                            let start = (range.offset as usize).min(file_len);
+                            let end = (start + range.length as usize).min(file_len);
+                            let slice = &mmap[start..end];
+                            let extent_id = blake3::hash(slice);
 
-                let flags = [
-                    extent.encrypted().then_some("encrypted"),
-                    extent.encoded().then_some("encoded"),
-                    extent.inline().then_some("inline"),
-                    extent.shared().then_some("shared"),
-                    extent.delayed_allocation().then_some("delayed"),
-                    extent.location_unknown().then_some("unknown"),
-                    extent.not_aligned().then_some("unaligned"),
-                    extent.packed().then_some("packed"),
-                    extent.simulated().then_some("sim"),
-                    extent.unwritten().then_some("unwritten"),
-                    extent.last().then_some("last"),
-                ]
-                .into_iter()
-                .filter_map(identity)
-                .collect::<Vec<_>>()
-                .join(",");
+                            let mut flags = Vec::new();
+                            if range.flags.shared {
+                                flags.push("shared");
+                            }
+                            let flags_str = flags.join(",");
 
-                raw_extents.push((
-                    extent.logical_offset,
-                    (end - start) as u64,
-                    extent_id,
-                    flags,
-                ));
-            }
-            Err(err) => {
-                error!(?path, %err, extents_read = raw_extents.len(), "Error reading extents, stopping");
-                extent_read_error = Some(err);
-                break;
+                            extent_displays.push(ExtentDisplay {
+                                logical_offset: range.offset,
+                                length: (end - start) as u64,
+                                flags: flags_str,
+                                is_sparse: false,
+                                hash: Some(hex::encode(extent_id.as_bytes())),
+                                bytes_read: end - start,
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        error!(?path, %err, extents_read = extent_displays.len(), "Error reading extents, stopping");
+                        extent_read_error = Some(err);
+                        break;
+                    }
+                }
             }
         }
+        Err(err) => {
+            error!(?path, %err, "Error starting extent read");
+            extent_read_error = Some(err);
+        }
     }
-
-    // Convert to format needed by detect_sparse_holes
-    let extents_for_holes: Vec<(u64, u64, [u8; 32])> = raw_extents
-        .iter()
-        .map(|(offset, len, id, _)| (*offset, *len, *id))
-        .collect();
-
-    // Detect sparse holes using library function
-    let extents_with_holes = detect_sparse_holes(&extents_for_holes, true_size);
-
-    // Build a map from (offset, bytes) to flags for non-sparse extents
-    let flags_map: std::collections::HashMap<(u64, u64), &str> = raw_extents
-        .iter()
-        .map(|(offset, len, _, flags)| ((*offset, *len), flags.as_str()))
-        .collect();
-
-    // Process extents in parallel
-    let extent_displays: Vec<ExtentDisplay> = extents_with_holes
-        .into_par_iter()
-        .map(|extent| {
-            if extent.is_sparse {
-                ExtentDisplay {
-                    logical_offset: extent.offset,
-                    length: extent.bytes,
-                    flags: "sparse".to_string(),
-                    is_sparse: true,
-                    hash: None,
-                    bytes_read: 0,
-                }
-            } else {
-                let flags = flags_map
-                    .get(&(extent.offset, extent.bytes))
-                    .copied()
-                    .unwrap_or("")
-                    .to_string();
-
-                ExtentDisplay {
-                    logical_offset: extent.offset,
-                    length: extent.bytes,
-                    flags,
-                    is_sparse: false,
-                    hash: Some(hex::encode(extent.extent_id)),
-                    bytes_read: extent.bytes as usize,
-                }
-            }
-        })
-        .collect();
 
     // Compute file hash in parallel
     let mut file_hasher = blake3::Hasher::new();
@@ -191,6 +151,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     })?;
 
     info!(files = args.paths.len(), "Starting extent analysis");
+
+    if can_detect_shared() {
+        debug!("Platform supports shared extent detection");
+    } else {
+        debug!("Platform does not support shared extent detection");
+    }
 
     // Process all files in parallel
     let results: Vec<_> = args

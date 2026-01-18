@@ -3,10 +3,9 @@
 use std::{fs::File, io, path::Path};
 
 use blake3::Hasher;
+use extentria::{DataRange, RangeReader};
 use memmap2::Mmap;
 use tracing::debug;
-
-use extentria::fiemap::FiemapLookup;
 
 /// Information about a file extent
 #[derive(Debug, Clone)]
@@ -15,6 +14,7 @@ pub struct ExtentInfo {
     pub offset: u64,
     pub bytes: u64,
     pub is_sparse: bool,
+    pub is_shared: bool,
 }
 
 /// Information about a file's blob
@@ -47,6 +47,7 @@ pub fn detect_sparse_holes(extents: &[(u64, u64, [u8; 32])], file_size: u64) -> 
                 offset: current_pos,
                 bytes: hole_size,
                 is_sparse: true,
+                is_shared: false,
             });
         }
 
@@ -55,6 +56,7 @@ pub fn detect_sparse_holes(extents: &[(u64, u64, [u8; 32])], file_size: u64) -> 
             offset: *logical_offset,
             bytes: *length,
             is_sparse: false,
+            is_shared: false,
         });
 
         current_pos = logical_offset + length;
@@ -73,10 +75,37 @@ pub fn detect_sparse_holes(extents: &[(u64, u64, [u8; 32])], file_size: u64) -> 
             offset: current_pos,
             bytes: hole_size,
             is_sparse: true,
+            is_shared: false,
         });
     }
 
     result
+}
+
+/// Convert a DataRange to ExtentInfo, computing the extent hash from file data.
+fn range_to_extent_info(range: &DataRange, mmap: &Mmap) -> ExtentInfo {
+    if range.flags.sparse {
+        ExtentInfo {
+            extent_id: [0u8; 32],
+            offset: range.offset,
+            bytes: range.length,
+            is_sparse: true,
+            is_shared: false,
+        }
+    } else {
+        let start = (range.offset as usize).min(mmap.len());
+        let end = (start + range.length as usize).min(mmap.len());
+        let slice = &mmap[start..end];
+        let extent_id = *blake3::hash(slice).as_bytes();
+
+        ExtentInfo {
+            extent_id,
+            offset: range.offset,
+            bytes: (end - start) as u64,
+            is_sparse: false,
+            is_shared: range.flags.shared,
+        }
+    }
 }
 
 /// Process a file's extents and compute its blob information.
@@ -98,22 +127,12 @@ pub fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
 
     let mmap = unsafe { Mmap::map(&file)? };
 
-    // Get extent information from FIEMAP
-    let extent_results: Result<Vec<_>, _> = FiemapLookup::extents_for_file(&file)?
-        .map(|r| {
-            r.map(|extent| {
-                let start = (extent.logical_offset as usize).min(mmap.len());
-                let end = (start + extent.length as usize).min(mmap.len());
-                let slice = &mmap[start..end];
-                let extent_id = *blake3::hash(slice).as_bytes();
-                (extent.logical_offset, (end - start) as u64, extent_id)
-            })
-        })
-        .collect();
+    // Get extent information using cross-platform API
+    let mut reader = RangeReader::new();
+    let ranges: Result<Vec<DataRange>, _> = reader.read_ranges(&file)?.collect();
+    let ranges = ranges?;
 
-    let raw_extents = extent_results?;
-
-    if raw_extents.is_empty() {
+    if ranges.is_empty() {
         // No extents reported, treat whole file as one extent
         let extent_id = *blake3::hash(&mmap[..]).as_bytes();
         let mut blob_hasher = Hasher::new();
@@ -128,12 +147,79 @@ pub fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
                 offset: 0,
                 bytes: file_len,
                 is_sparse: false,
+                is_shared: false,
             }],
         }));
     }
 
-    // Detect sparse holes
-    let extents = detect_sparse_holes(&raw_extents, file_len);
+    // Convert ranges to ExtentInfo, computing hashes for data ranges
+    let extents: Vec<ExtentInfo> = ranges
+        .iter()
+        .map(|range| range_to_extent_info(range, &mmap))
+        .collect();
+
+    // Compute blob hash (hash of full file contents)
+    let mut blob_hasher = Hasher::new();
+    blob_hasher.update_rayon(&mmap[..]);
+    let blob_id = *blob_hasher.finalize().as_bytes();
+
+    Ok(Some(BlobInfo {
+        blob_id,
+        bytes: file_len,
+        extents,
+    }))
+}
+
+/// Process a file's extents with a reusable RangeReader for better performance
+/// when processing multiple files.
+pub fn process_file_extents_with_reader(
+    path: &Path,
+    reader: &mut RangeReader,
+) -> io::Result<Option<BlobInfo>> {
+    debug!(?path, "Processing file extents");
+
+    let file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+
+    if file_len == 0 {
+        return Ok(Some(BlobInfo {
+            blob_id: *blake3::hash(&[]).as_bytes(),
+            bytes: 0,
+            extents: Vec::new(),
+        }));
+    }
+
+    let mmap = unsafe { Mmap::map(&file)? };
+
+    // Get extent information using cross-platform API
+    let ranges: Result<Vec<DataRange>, _> = reader.read_ranges(&file)?.collect();
+    let ranges = ranges?;
+
+    if ranges.is_empty() {
+        // No extents reported, treat whole file as one extent
+        let extent_id = *blake3::hash(&mmap[..]).as_bytes();
+        let mut blob_hasher = Hasher::new();
+        blob_hasher.update(&mmap[..]);
+        let blob_id = *blob_hasher.finalize().as_bytes();
+
+        return Ok(Some(BlobInfo {
+            blob_id,
+            bytes: file_len,
+            extents: vec![ExtentInfo {
+                extent_id,
+                offset: 0,
+                bytes: file_len,
+                is_sparse: false,
+                is_shared: false,
+            }],
+        }));
+    }
+
+    // Convert ranges to ExtentInfo, computing hashes for data ranges
+    let extents: Vec<ExtentInfo> = ranges
+        .iter()
+        .map(|range| range_to_extent_info(range, &mmap))
+        .collect();
 
     // Compute blob hash (hash of full file contents)
     let mut blob_hasher = Hasher::new();
