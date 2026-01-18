@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -12,7 +13,8 @@ use walkdir::WalkDir;
 
 use tumulus::{
     DEFAULT_COMPRESSION_LEVEL, FileInfo, compression::compress_file_with_level, compute_tree_hash,
-    create_catalog_schema, get_machine_id, process_file, write_catalog,
+    create_catalog_schema, get_fs_info, get_hostname, get_machine_id, is_readonly, process_file,
+    write_catalog,
 };
 
 #[derive(Parser, Debug)]
@@ -33,8 +35,24 @@ struct Args {
     #[arg(long, short = 'c', default_value_t = DEFAULT_COMPRESSION_LEVEL)]
     compression: i32,
 
+    /// Friendly name for this catalog
+    #[arg(long, short = 'n')]
+    name: Option<String>,
+
+    /// Extra metadata in KEY=VALUE format (can be specified multiple times)
+    #[arg(long, short = 'm', value_parser = parse_key_value)]
+    meta: Vec<(String, String)>,
+
     #[command(flatten)]
     logging: LoggingArgs,
+}
+
+/// Parse a KEY=VALUE string into a tuple.
+fn parse_key_value(s: &str) -> Result<(String, String), String> {
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=VALUE: no '=' found in '{}'", s))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -104,38 +122,78 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let created = Timestamp::now();
 
-    // Insert metadata
-    conn.execute(
-        "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-        params!["protocol", json!(1).to_string()],
-    )?;
-    conn.execute(
-        "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-        params!["id", json!(catalog_id.simple().to_string()).to_string()],
-    )?;
-    conn.execute(
-        "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-        params!["machine", json!(machine_id).to_string()],
-    )?;
-    conn.execute(
-        "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-        params!["tree", json!(hex::encode(tree_hash)).to_string()],
-    )?;
-    conn.execute(
-        "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-        params!["created", json!(created.as_millisecond()).to_string()],
-    )?;
-    conn.execute(
-        "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-        params!["started", json!(started.as_millisecond()).to_string()],
-    )?;
-    conn.execute(
-        "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-        params![
-            "source_path",
-            json!(source_path.to_string_lossy()).to_string()
-        ],
-    )?;
+    // Collect all metadata
+    let mut metadata: HashMap<&str, serde_json::Value> = HashMap::new();
+
+    // Mandatory metadata
+    metadata.insert("protocol", json!(1));
+    metadata.insert("id", json!(catalog_id.simple().to_string()));
+    metadata.insert("machine", json!(machine_id));
+    metadata.insert("tree", json!(hex::encode(tree_hash)));
+    metadata.insert("created", json!(created.as_millisecond()));
+
+    // Optional metadata - started and source_path
+    metadata.insert("started", json!(started.as_millisecond()));
+    metadata.insert("source_path", json!(source_path.to_string_lossy()));
+
+    // Insert mandatory and basic optional metadata
+    for (key, value) in &metadata {
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+            params![key, value.to_string()],
+        )?;
+    }
+
+    // Optional: catalog name
+    if let Some(ref name) = args.name {
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+            params!["name", json!(name).to_string()],
+        )?;
+    }
+
+    // Optional: machine hostname
+    if let Some(hostname) = get_hostname() {
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+            params!["machine_hostname", json!(hostname).to_string()],
+        )?;
+    }
+
+    // Optional: filesystem info
+    if let Ok(fs_info) = get_fs_info(&source_path) {
+        if let Some(ref fs_type) = fs_info.fs_type {
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+                params!["fs_type", json!(fs_type).to_string()],
+            )?;
+        }
+        if let Some(ref fs_id) = fs_info.fs_id {
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+                params!["fs_id", json!(fs_id).to_string()],
+            )?;
+        }
+    }
+
+    // Optional: fs_writeable (true if not readonly)
+    if let Ok(readonly) = is_readonly(&source_path) {
+        if !readonly {
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+                params!["fs_writeable", json!(true).to_string()],
+            )?;
+        }
+    }
+
+    // User-provided extra metadata
+    for (key, value) in &args.meta {
+        let prefixed_key = format!("extra.{}", key);
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+            params![prefixed_key, json!(value).to_string()],
+        )?;
+    }
 
     // Write catalog data
     let stats = write_catalog(&conn, &file_infos)?;

@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod compression;
 pub mod extents;
 pub mod file;
+pub mod fsinfo;
 pub mod machine;
 pub mod tree;
 
@@ -17,5 +18,6 @@ pub use compression::{
 };
 pub use extents::{BlobInfo, ExtentInfo, detect_sparse_holes, process_file_extents};
 pub use file::{FileInfo, process_file};
+pub use fsinfo::{FsInfo, get_fs_info, get_hostname, is_readonly};
 pub use machine::get_machine_id;
 pub use tree::compute_tree_hash;
