@@ -3,17 +3,20 @@
 //! This binary takes a catalog file, verifies it matches the local machine,
 //! and uploads it to a tumulus server.
 
-use std::fs;
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use lloggs::LoggingArgs;
 use reqwest::blocking::Client;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use tumulus::{get_machine_id, open_catalog};
+use tumulus::open_catalog;
 
 #[derive(Parser)]
 #[command(name = "tumulus-upload")]
@@ -112,6 +115,21 @@ enum UploadError {
         "Catalog ID changed by server from {original} to {new}. Please update the catalog and retry."
     )]
     IdChanged { original: Uuid, new: Uuid },
+
+    #[error(
+        "Extent {extent_id} has changed on disk: expected hash {expected}, got {actual}. Aborting upload."
+    )]
+    ExtentChanged {
+        extent_id: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("Extent {extent_id} not found in catalog")]
+    ExtentNotInCatalog { extent_id: String },
+
+    #[error("File not found for extent {extent_id}: {path}")]
+    FileNotFound { extent_id: String, path: PathBuf },
 }
 
 /// Metadata extracted from the catalog.
@@ -119,6 +137,17 @@ struct CatalogMetadata {
     id: Uuid,
     machine_id: String,
     source_path: Option<PathBuf>,
+}
+
+/// Information about where to find an extent on disk.
+#[derive(Debug, Clone)]
+struct ExtentLocation {
+    /// Relative path to the file containing this extent
+    file_path: String,
+    /// Offset within the file where the extent starts
+    offset: u64,
+    /// Length of the extent in bytes
+    length: u64,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -142,7 +171,10 @@ fn run(args: Args) -> Result<(), UploadError> {
     info!(catalog = ?args.catalog, server = %args.server, "Starting catalog upload");
 
     // Open and read catalog metadata
-    let metadata = read_catalog_metadata(&args.catalog)?;
+    let (conn, _tempfile) =
+        open_catalog(&args.catalog).map_err(|e| UploadError::OpenCatalog(e.to_string()))?;
+
+    let metadata = read_catalog_metadata(&conn)?;
     info!(
         catalog_id = %metadata.id,
         machine_id = %metadata.machine_id,
@@ -152,7 +184,7 @@ fn run(args: Args) -> Result<(), UploadError> {
 
     // Verify machine ID matches
     if !args.skip_machine_check {
-        let local_machine_id = get_machine_id()
+        let local_machine_id = tumulus::get_machine_id()
             .map_err(|e| UploadError::OpenCatalog(format!("Failed to get machine ID: {}", e)))?;
 
         if metadata.machine_id != local_machine_id {
@@ -187,6 +219,13 @@ fn run(args: Args) -> Result<(), UploadError> {
         return Err(UploadError::SourcePathNotFound(source_path));
     }
     debug!(path = ?source_path, "Source path verified");
+
+    // Build extent location map from catalog
+    let extent_locations = build_extent_location_map(&conn)?;
+    info!(
+        extent_count = extent_locations.len(),
+        "Built extent location map"
+    );
 
     // Compute checksum of the catalog file
     let catalog_data = fs::read(&args.catalog)?;
@@ -250,15 +289,18 @@ fn run(args: Args) -> Result<(), UploadError> {
                 "Uploading missing extents"
             );
 
-            // TODO: Implement extent upload
-            // For now, just print what needs to be done
-            for extent_id in &current_missing {
-                debug!(extent_id = %extent_id, "Missing extent");
-            }
+            upload_extents(
+                &client,
+                server_url,
+                &current_missing,
+                &extent_locations,
+                &source_path,
+            )?;
 
-            todo!(
-                "Extent upload not yet implemented - {} extents to upload",
-                current_missing.len()
+            info!(
+                attempt,
+                count = current_missing.len(),
+                "Finished uploading extents"
             );
         }
 
@@ -299,10 +341,7 @@ fn run(args: Args) -> Result<(), UploadError> {
     Ok(())
 }
 
-fn read_catalog_metadata(path: &Path) -> Result<CatalogMetadata, UploadError> {
-    let (conn, _tempfile) =
-        open_catalog(path).map_err(|e| UploadError::OpenCatalog(e.to_string()))?;
-
+fn read_catalog_metadata(conn: &Connection) -> Result<CatalogMetadata, UploadError> {
     // Read catalog ID
     let id_str: String = conn
         .query_row("SELECT value FROM metadata WHERE key = 'id'", [], |row| {
@@ -346,6 +385,58 @@ fn read_catalog_metadata(path: &Path) -> Result<CatalogMetadata, UploadError> {
         machine_id,
         source_path,
     })
+}
+
+/// Build a map from extent ID (hex) to its location on disk.
+///
+/// This queries the catalog to find all extents and which files contain them.
+fn build_extent_location_map(
+    conn: &Connection,
+) -> Result<HashMap<String, ExtentLocation>, UploadError> {
+    let mut map = HashMap::new();
+
+    // Query to find extent locations:
+    // For each extent, find a file that contains it via:
+    // files.blob_id -> blob_extents.blob_id -> blob_extents.extent_id
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            hex(be.extent_id) as extent_id,
+            f.path,
+            be.offset,
+            be.bytes
+        FROM blob_extents be
+        JOIN files f ON f.blob_id = be.blob_id
+        WHERE be.extent_id IS NOT NULL
+        "#,
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        let extent_id: String = row.get(0)?;
+        let path_bytes: Vec<u8> = row.get(1)?;
+        let offset: i64 = row.get(2)?;
+        let bytes: i64 = row.get(3)?;
+
+        Ok((extent_id, path_bytes, offset as u64, bytes as u64))
+    })?;
+
+    for row in rows {
+        let (extent_id, path_bytes, offset, length) = row?;
+
+        // Convert path bytes to string
+        let file_path = String::from_utf8_lossy(&path_bytes).to_string();
+
+        // Only insert if we don't already have this extent
+        // (multiple files might reference the same extent due to dedup)
+        map.entry(extent_id.to_lowercase())
+            .or_insert(ExtentLocation {
+                file_path,
+                offset,
+                length,
+            });
+    }
+
+    Ok(map)
 }
 
 fn initiate_upload(
@@ -398,6 +489,134 @@ fn upload_catalog(
 
     let upload_resp: UploadResponse = resp.json()?;
     Ok(upload_resp)
+}
+
+/// Upload a list of extents to the server.
+///
+/// For each extent:
+/// 1. Look up its location in the catalog
+/// 2. Read from the source file at the specified offset
+/// 3. Compute BLAKE3 hash while reading
+/// 4. If hash doesn't match, abort the entire upload
+/// 5. Stream data to server
+fn upload_extents(
+    client: &Client,
+    server_url: &str,
+    extent_ids: &[String],
+    extent_locations: &HashMap<String, ExtentLocation>,
+    source_path: &Path,
+) -> Result<(), UploadError> {
+    for (i, extent_id_hex) in extent_ids.iter().enumerate() {
+        let extent_id_lower = extent_id_hex.to_lowercase();
+
+        // Find the extent location in our map
+        let location = extent_locations.get(&extent_id_lower).ok_or_else(|| {
+            UploadError::ExtentNotInCatalog {
+                extent_id: extent_id_hex.clone(),
+            }
+        })?;
+
+        debug!(
+            extent = %extent_id_hex,
+            file = %location.file_path,
+            offset = location.offset,
+            length = location.length,
+            progress = format!("{}/{}", i + 1, extent_ids.len()),
+            "Uploading extent"
+        );
+
+        // Construct full path to the file
+        let file_path = source_path.join(&location.file_path);
+
+        if !file_path.exists() {
+            return Err(UploadError::FileNotFound {
+                extent_id: extent_id_hex.clone(),
+                path: file_path,
+            });
+        }
+
+        // Read the extent data and compute hash
+        let extent_data = read_extent_with_hash_check(
+            &file_path,
+            location.offset,
+            location.length,
+            extent_id_hex,
+        )?;
+
+        // Upload to server
+        upload_extent(client, server_url, extent_id_hex, &extent_data)?;
+
+        if (i + 1) % 100 == 0 || i + 1 == extent_ids.len() {
+            info!(
+                progress = format!("{}/{}", i + 1, extent_ids.len()),
+                "Extent upload progress"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Read extent data from a file and verify the hash matches.
+///
+/// Returns the extent data if the hash matches, or an error if it doesn't.
+fn read_extent_with_hash_check(
+    file_path: &Path,
+    offset: u64,
+    length: u64,
+    expected_hash_hex: &str,
+) -> Result<Vec<u8>, UploadError> {
+    let mut file = File::open(file_path)?;
+
+    // Seek to the extent offset
+    file.seek(SeekFrom::Start(offset))?;
+
+    // Read the extent data
+    let mut data = vec![0u8; length as usize];
+    file.read_exact(&mut data)?;
+
+    // Compute the BLAKE3 hash
+    let actual_hash = blake3::hash(&data);
+    let actual_hash_hex = actual_hash.to_hex().to_string();
+
+    // Compare (case-insensitive)
+    if actual_hash_hex.to_lowercase() != expected_hash_hex.to_lowercase() {
+        return Err(UploadError::ExtentChanged {
+            extent_id: expected_hash_hex.to_string(),
+            expected: expected_hash_hex.to_string(),
+            actual: actual_hash_hex,
+        });
+    }
+
+    Ok(data)
+}
+
+/// Upload a single extent to the server.
+fn upload_extent(
+    client: &Client,
+    server_url: &str,
+    extent_id: &str,
+    data: &[u8],
+) -> Result<(), UploadError> {
+    let url = format!("{}/extents/{}", server_url, extent_id.to_lowercase());
+
+    let resp = client
+        .put(&url)
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", data.len())
+        .body(data.to_vec())
+        .send()?;
+
+    // 200 OK = already existed, 201 Created = newly stored
+    if !resp.status().is_success() {
+        let error_resp: ErrorResponse = resp.json()?;
+        return Err(UploadError::Server {
+            error: error_resp.error,
+            detail: error_resp.detail,
+        });
+    }
+
+    Ok(())
 }
 
 fn finalize_upload(
