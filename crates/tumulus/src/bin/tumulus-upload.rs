@@ -7,9 +7,12 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::Parser;
 use lloggs::LoggingArgs;
+use rayon::prelude::*;
 use reqwest::blocking::Client;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -36,6 +39,10 @@ struct Args {
     /// Override the source path from the catalog with a different path
     #[arg(long)]
     override_source: Option<PathBuf>,
+
+    /// Number of parallel upload threads (default: 32)
+    #[arg(long, short = 'j', default_value = "32")]
+    parallel: usize,
 
     #[command(flatten)]
     logging: LoggingArgs,
@@ -225,6 +232,16 @@ fn run(args: Args) -> Result<(), UploadError> {
     info!(
         extent_count = extent_locations.len(),
         "Built extent location map"
+    );
+
+    // Configure thread pool for parallel uploads
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.parallel)
+        .build_global()
+        .ok(); // Ignore error if pool already initialized
+    info!(
+        threads = args.parallel,
+        "Configured parallel upload threads"
     );
 
     // Compute checksum of the catalog file
@@ -491,7 +508,7 @@ fn upload_catalog(
     Ok(upload_resp)
 }
 
-/// Upload a list of extents to the server.
+/// Upload a list of extents to the server in parallel.
 ///
 /// For each extent:
 /// 1. Look up its location in the catalog
@@ -506,53 +523,73 @@ fn upload_extents(
     extent_locations: &HashMap<String, ExtentLocation>,
     source_path: &Path,
 ) -> Result<(), UploadError> {
-    for (i, extent_id_hex) in extent_ids.iter().enumerate() {
-        let extent_id_lower = extent_id_hex.to_lowercase();
+    let total = extent_ids.len();
+    let completed = Arc::new(AtomicUsize::new(0));
+    let last_logged = Arc::new(AtomicUsize::new(0));
 
-        // Find the extent location in our map
-        let location = extent_locations.get(&extent_id_lower).ok_or_else(|| {
-            UploadError::ExtentNotInCatalog {
-                extent_id: extent_id_hex.clone(),
-            }
-        })?;
+    // Use rayon to upload extents in parallel
+    // The reqwest Client is Clone and uses an internal connection pool
+    extent_ids
+        .par_iter()
+        .try_for_each(|extent_id_hex| -> Result<(), UploadError> {
+            let extent_id_lower = extent_id_hex.to_lowercase();
 
-        debug!(
-            extent = %extent_id_hex,
-            file = %location.file_path,
-            offset = location.offset,
-            length = location.length,
-            progress = format!("{}/{}", i + 1, extent_ids.len()),
-            "Uploading extent"
-        );
+            // Find the extent location in our map
+            let location = extent_locations.get(&extent_id_lower).ok_or_else(|| {
+                UploadError::ExtentNotInCatalog {
+                    extent_id: extent_id_hex.clone(),
+                }
+            })?;
 
-        // Construct full path to the file
-        let file_path = source_path.join(&location.file_path);
-
-        if !file_path.exists() {
-            return Err(UploadError::FileNotFound {
-                extent_id: extent_id_hex.clone(),
-                path: file_path,
-            });
-        }
-
-        // Read the extent data and compute hash
-        let extent_data = read_extent_with_hash_check(
-            &file_path,
-            location.offset,
-            location.length,
-            extent_id_hex,
-        )?;
-
-        // Upload to server
-        upload_extent(client, server_url, extent_id_hex, &extent_data)?;
-
-        if (i + 1) % 100 == 0 || i + 1 == extent_ids.len() {
-            info!(
-                progress = format!("{}/{}", i + 1, extent_ids.len()),
-                "Extent upload progress"
+            debug!(
+                extent = %extent_id_hex,
+                file = %location.file_path,
+                offset = location.offset,
+                length = location.length,
+                "Uploading extent"
             );
-        }
-    }
+
+            // Construct full path to the file
+            let file_path = source_path.join(&location.file_path);
+
+            if !file_path.exists() {
+                return Err(UploadError::FileNotFound {
+                    extent_id: extent_id_hex.clone(),
+                    path: file_path,
+                });
+            }
+
+            // Read the extent data and compute hash
+            let extent_data = read_extent_with_hash_check(
+                &file_path,
+                location.offset,
+                location.length,
+                extent_id_hex,
+            )?;
+
+            // Use the shared client - it has an internal connection pool
+            upload_extent(client, server_url, extent_id_hex, &extent_data)?;
+
+            // Update progress
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+
+            // Log progress every 100 extents or at completion
+            // Use compare_exchange to avoid duplicate logs from multiple threads
+            let last = last_logged.load(Ordering::Relaxed);
+            if done == total
+                || (done >= last + 100
+                    && last_logged
+                        .compare_exchange(last, done, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok())
+            {
+                info!(
+                    progress = format!("{}/{}", done, total),
+                    "Extent upload progress"
+                );
+            }
+
+            Ok(())
+        })?;
 
     Ok(())
 }
