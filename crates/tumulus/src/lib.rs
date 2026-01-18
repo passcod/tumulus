@@ -1,0 +1,16 @@
+//! Tumulus - Snapshot catalog builder
+//!
+//! This library provides functionality to build snapshot catalogs from directory trees,
+//! tracking file extents, blobs, and metadata in a SQLite database.
+
+pub mod catalog;
+pub mod extents;
+pub mod file;
+pub mod machine;
+pub mod tree;
+
+pub use catalog::{CatalogStats, create_catalog_schema, write_catalog};
+pub use extents::{BlobInfo, ExtentInfo, detect_sparse_holes, process_file_extents};
+pub use file::{FileInfo, process_file};
+pub use machine::get_machine_id;
+pub use tree::compute_tree_hash;

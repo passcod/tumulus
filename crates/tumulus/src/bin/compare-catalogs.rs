@@ -1,22 +1,40 @@
 use std::path::PathBuf;
 
+use clap::Parser;
+use lloggs::LoggingArgs;
 use rusqlite::Connection;
+use tracing::info;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("USAGE: compare-catalogs <local_catalog> <remote_catalog>");
-        eprintln!();
-        eprintln!("Compares two catalogs and reports extents that would need to be");
-        eprintln!("transferred from local to remote.");
-        std::process::exit(1);
-    }
+#[derive(Parser, Debug)]
+#[command(name = "compare-catalogs")]
+#[command(about = "Compare two catalogs and report transfer requirements")]
+struct Args {
+    /// Local catalog file (source)
+    local_catalog: PathBuf,
 
-    let local_path = PathBuf::from(&args[1]);
-    let remote_path = PathBuf::from(&args[2]);
+    /// Remote catalog file (destination)
+    remote_catalog: PathBuf,
 
-    let local_conn = Connection::open(&local_path)?;
-    let remote_conn = Connection::open(&remote_path)?;
+    #[command(flatten)]
+    logging: LoggingArgs,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let args = Args::parse();
+    let _guard = args.logging.setup(|v| match v {
+        0 => "warn",
+        1 => "info",
+        2 => "debug",
+        _ => "trace",
+    })?;
+
+    let local_path = &args.local_catalog;
+    let remote_path = &args.remote_catalog;
+
+    info!(?local_path, ?remote_path, "Comparing catalogs");
+
+    let local_conn = Connection::open(local_path)?;
+    let remote_conn = Connection::open(remote_path)?;
 
     // Get local catalog stats
     let local_extent_count: i64 =
@@ -126,6 +144,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Extents: {}", remote_only_count);
         println!("  Bytes: {}", remote_only_bytes);
     }
+
+    info!(
+        missing_count,
+        missing_bytes, shared_count, shared_bytes, "Comparison complete"
+    );
 
     Ok(())
 }

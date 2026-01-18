@@ -7,6 +7,8 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 use tracing::{debug, error, info, warn};
 
+use tumulus::extents::detect_sparse_holes;
+
 #[derive(Parser, Debug)]
 #[command(name = "debug-extents")]
 #[command(about = "Display extent information for files")]
@@ -23,76 +25,22 @@ struct Args {
     logging: LoggingArgs,
 }
 
-struct FileExtent {
+struct ExtentDisplay {
     logical_offset: u64,
     length: u64,
     flags: String,
     is_sparse: bool,
-}
-
-struct ExtentResult {
-    extent: FileExtent,
     hash: Option<String>,
     bytes_read: usize,
 }
 
 struct FileResult {
     path: PathBuf,
-    extent_results: Vec<ExtentResult>,
+    extents: Vec<ExtentDisplay>,
     file_hash: String,
     total_read: u64,
     true_size: u64,
     sparse_bytes: u64,
-}
-
-fn detect_sparse_holes(extents: &[(u64, u64, String)], file_size: u64) -> Vec<FileExtent> {
-    let mut result = Vec::new();
-    let mut current_pos: u64 = 0;
-
-    for (logical_offset, length, flags) in extents {
-        // If there's a gap before this extent, it's a sparse hole
-        if *logical_offset > current_pos {
-            let hole_size = logical_offset - current_pos;
-            debug!(
-                offset = current_pos,
-                size = hole_size,
-                "Detected sparse hole"
-            );
-            result.push(FileExtent {
-                logical_offset: current_pos,
-                length: hole_size,
-                flags: "sparse".to_string(),
-                is_sparse: true,
-            });
-        }
-
-        result.push(FileExtent {
-            logical_offset: *logical_offset,
-            length: *length,
-            flags: flags.clone(),
-            is_sparse: false,
-        });
-
-        current_pos = logical_offset + length;
-    }
-
-    // Check for trailing sparse hole
-    if current_pos < file_size {
-        let hole_size = file_size - current_pos;
-        debug!(
-            offset = current_pos,
-            size = hole_size,
-            "Detected trailing sparse hole"
-        );
-        result.push(FileExtent {
-            logical_offset: current_pos,
-            length: hole_size,
-            flags: "sparse".to_string(),
-            is_sparse: true,
-        });
-    }
-
-    result
 }
 
 fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
@@ -104,7 +52,7 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
     if true_size == 0 {
         return Ok(FileResult {
             path,
-            extent_results: Vec::new(),
+            extents: Vec::new(),
             file_hash: blake3::hash(&[]).to_hex().to_string(),
             total_read: 0,
             true_size: 0,
@@ -115,10 +63,15 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
     let mmap = unsafe { Mmap::map(&file)? };
     let file_len = mmap.len();
 
-    // Get extent information from FIEMAP
-    let raw_extents: Vec<(u64, u64, String)> = FiemapLookup::extents_for_file(&file)?
+    // Get extent information from FIEMAP and compute hashes
+    let raw_extents: Vec<(u64, u64, [u8; 32], String)> = FiemapLookup::extents_for_file(&file)?
         .filter_map(|r| r.ok())
         .map(|extent| {
+            let start = (extent.logical_offset as usize).min(file_len);
+            let end = (start + extent.length as usize).min(file_len);
+            let slice = &mmap[start..end];
+            let extent_id = *blake3::hash(slice).as_bytes();
+
             let flags = [
                 extent.encrypted().then_some("encrypted"),
                 extent.encoded().then_some("encoded"),
@@ -137,33 +90,57 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
             .collect::<Vec<_>>()
             .join(",");
 
-            (extent.logical_offset, extent.length, flags)
+            (
+                extent.logical_offset,
+                (end - start) as u64,
+                extent_id,
+                flags,
+            )
         })
         .collect();
 
-    // Detect sparse holes
-    let extents_with_holes = detect_sparse_holes(&raw_extents, true_size);
+    // Convert to format needed by detect_sparse_holes
+    let extents_for_holes: Vec<(u64, u64, [u8; 32])> = raw_extents
+        .iter()
+        .map(|(offset, len, id, _)| (*offset, *len, *id))
+        .collect();
 
-    // Process extents in parallel (skip sparse holes for hashing)
-    let extent_results: Vec<ExtentResult> = extents_with_holes
+    // Detect sparse holes using library function
+    let extents_with_holes = detect_sparse_holes(&extents_for_holes, true_size);
+
+    // Build a map from (offset, bytes) to flags for non-sparse extents
+    let flags_map: std::collections::HashMap<(u64, u64), &str> = raw_extents
+        .iter()
+        .map(|(offset, len, _, flags)| ((*offset, *len), flags.as_str()))
+        .collect();
+
+    // Process extents in parallel
+    let extent_displays: Vec<ExtentDisplay> = extents_with_holes
         .into_par_iter()
         .map(|extent| {
             if extent.is_sparse {
-                ExtentResult {
-                    extent,
+                ExtentDisplay {
+                    logical_offset: extent.offset,
+                    length: extent.bytes,
+                    flags: "sparse".to_string(),
+                    is_sparse: true,
                     hash: None,
                     bytes_read: 0,
                 }
             } else {
-                let start = (extent.logical_offset as usize).min(file_len);
-                let end = (start + extent.length as usize).min(file_len);
-                let slice = &mmap[start..end];
-                let hash = blake3::hash(slice).to_hex().to_string();
+                let flags = flags_map
+                    .get(&(extent.offset, extent.bytes))
+                    .copied()
+                    .unwrap_or("")
+                    .to_string();
 
-                ExtentResult {
-                    bytes_read: end - start,
-                    hash: Some(hash),
-                    extent,
+                ExtentDisplay {
+                    logical_offset: extent.offset,
+                    length: extent.bytes,
+                    flags,
+                    is_sparse: false,
+                    hash: Some(hex::encode(extent.extent_id)),
+                    bytes_read: extent.bytes as usize,
                 }
             }
         })
@@ -174,16 +151,16 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
     file_hasher.update_rayon(&mmap[..]);
     let file_hash = file_hasher.finalize().to_hex().to_string();
 
-    let total_read: u64 = extent_results.iter().map(|r| r.bytes_read as u64).sum();
-    let sparse_bytes: u64 = extent_results
+    let total_read: u64 = extent_displays.iter().map(|r| r.bytes_read as u64).sum();
+    let sparse_bytes: u64 = extent_displays
         .iter()
-        .filter(|r| r.extent.is_sparse)
-        .map(|r| r.extent.length)
+        .filter(|r| r.is_sparse)
+        .map(|r| r.length)
         .sum();
 
     Ok(FileResult {
         path,
-        extent_results,
+        extents: extent_displays,
         file_hash,
         total_read,
         true_size,
@@ -216,17 +193,17 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for (path, result) in results {
         match result {
             Ok(file_result) => {
-                for er in &file_result.extent_results {
-                    let hash_str = er.hash.as_deref().unwrap_or("(sparse)");
+                for ext in &file_result.extents {
+                    let hash_str = ext.hash.as_deref().unwrap_or("(sparse)");
                     println!(
                         "{}\textent start={:7}\tend={:7}\tsize={:7}\tflags={}\thash={}\tread={}",
                         file_result.path.display(),
-                        er.extent.logical_offset,
-                        er.extent.logical_offset + er.extent.length,
-                        er.extent.length,
-                        er.extent.flags,
+                        ext.logical_offset,
+                        ext.logical_offset + ext.length,
+                        ext.length,
+                        ext.flags,
                         hash_str,
-                        er.bytes_read,
+                        ext.bytes_read,
                     );
                 }
 
