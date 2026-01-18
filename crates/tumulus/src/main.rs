@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -83,20 +82,18 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!(entries = paths.len(), "Found entries");
 
-    // Thread-local RangeReader for buffer reuse within each rayon thread
-    thread_local! {
-        static RANGE_READER: RefCell<RangeReader> = RefCell::new(RangeReader::new());
-    }
-
-    // Process files in parallel, reusing buffers per-thread
+    // Process files in parallel, with per-thread RangeReader for buffer reuse
     let results: Vec<_> = paths
         .par_iter()
-        .map(|path| {
-            let result = RANGE_READER.with(|reader| {
-                process_file_with_reader(path, &source_path, &mut reader.borrow_mut())
-            });
-            (path.clone(), result)
-        })
+        .map_init(
+            || RangeReader::new(),
+            |reader, path| {
+                (
+                    path.clone(),
+                    process_file_with_reader(path, &source_path, reader),
+                )
+            },
+        )
         .collect();
 
     // Collect successful results and handle errors
