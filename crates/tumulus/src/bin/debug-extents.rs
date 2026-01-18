@@ -13,6 +13,7 @@ fn main() -> std::io::Result<()> {
     let mut file_hash = blake3::Hasher::new();
 
     let mut total_length = 0;
+    let mut buf = [0u8; 16384];
     for item in FiemapLookup::extents_for_file(&file)? {
         match item {
             Err(err) => eprintln!("error reading {file:?}: {err}"),
@@ -44,10 +45,17 @@ fn main() -> std::io::Result<()> {
                 let mut hash = blake3::Hasher::new();
                 seeker.seek(std::io::SeekFrom::Start(extent.logical_offset))?;
                 let mut segment = seeker.by_ref().take(extent.length);
-                file_hash.update_reader(segment.by_ref())?;
-                segment.rewind()?;
-                hash.update_reader(segment)?;
-                println!("hash={}", hash.finalize().to_hex());
+                let mut bytes_read = 0u64;
+                loop {
+                    let n = segment.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    bytes_read += n as u64;
+                    file_hash.update(&buf[..n]);
+                    hash.update(&buf[..n]);
+                }
+                println!("read={bytes_read}\thash={}", hash.finalize().to_hex());
 
                 total_length += extent.length;
             }
