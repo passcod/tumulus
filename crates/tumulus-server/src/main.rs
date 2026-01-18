@@ -5,7 +5,7 @@ use clap::Parser;
 use lloggs::LoggingArgs;
 use tracing::info;
 
-use tumulus_server::{api, storage::FsStorage};
+use tumulus_server::{api, db::UploadDb, storage::FsStorage};
 
 #[derive(Parser)]
 #[command(name = "tumulus-server")]
@@ -39,8 +39,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let storage = FsStorage::new(&args.storage);
     storage.init().await?;
 
+    // Initialize upload tracking database
+    let db_path = args.storage.join("uploads.db");
+    let db = UploadDb::open(&db_path)?;
+    info!(db_path = ?db_path, "Initialized upload tracking database");
+
     // Build router
-    let app = api::router(storage);
+    let app = api::router(storage, db);
 
     // Start server
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;

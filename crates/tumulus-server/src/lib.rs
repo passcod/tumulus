@@ -6,9 +6,14 @@
 pub mod api;
 pub mod blob;
 pub mod config;
+pub mod db;
 pub mod storage;
 
-pub use api::router;
+pub use api::{
+    CatalogError, ErrorResponse, FinalizeResponse, InitiateRequest, InitiateResponse,
+    UploadResponse, router,
+};
 pub use blob::{BlobDecodeError, BlobExtent, BlobLayout, BlobRegion};
 pub use config::Config;
+pub use db::{CatalogInfo, CatalogStatus, DbError, UploadDb};
 pub use storage::{ByteReader, ByteStream, FsStorage, ObjectMeta, Storage, StorageError};
