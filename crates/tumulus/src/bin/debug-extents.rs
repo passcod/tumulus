@@ -12,6 +12,7 @@ fn main() -> std::io::Result<()> {
     let mut seeker = File::open(&path)?;
     let mut file_hash = blake3::Hasher::new();
 
+    let mut total_extents = 0;
     let mut total_length = 0;
     let mut buf = [0u8; 16384];
     for item in FiemapLookup::extents_for_file(&file)? {
@@ -57,13 +58,14 @@ fn main() -> std::io::Result<()> {
                 }
                 println!("read={bytes_read}\thash={}", hash.finalize().to_hex());
 
-                total_length += extent.length;
+                total_extents += extent.length;
+                total_length += bytes_read;
             }
         }
     }
 
     println!(
-        "file\tsize={total_length}\ttrue={}\thash={}",
+        "file\tsize={total_length}\textsum={total_extents}\ttrue={}\thash={}",
         file.metadata()?.len(),
         file_hash.finalize().to_hex()
     );
