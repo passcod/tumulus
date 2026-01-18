@@ -13,6 +13,7 @@ struct ExtentInfo {
 struct ExtentResult {
     info: ExtentInfo,
     hash: String,
+    bytes_read: usize,
 }
 
 fn main() -> std::io::Result<()> {
@@ -64,12 +65,20 @@ fn main() -> std::io::Result<()> {
 
             let hash = blake3::hash(slice).to_hex().to_string();
 
-            ExtentResult { info, hash }
+            ExtentResult {
+                info,
+                hash,
+                bytes_read: end - start,
+            }
         })
         .collect();
 
-    // Print results in order and compute file hash
-    let mut file_hash = blake3::Hasher::new();
+    // Compute file hash in parallel using update_rayon
+    let mut file_hasher = blake3::Hasher::new();
+    file_hasher.update_rayon(&mmap[..]);
+    let file_hash = file_hasher.finalize();
+
+    // Print results in order
     let mut total_length = 0u64;
 
     for result in results {
@@ -81,21 +90,16 @@ fn main() -> std::io::Result<()> {
             info.length,
             info.flags,
             result.hash,
-            info.length,
+            result.bytes_read,
         );
 
-        // Update file hash in order
-        let start = (info.logical_offset as usize).min(file_len);
-        let end = (start + info.length as usize).min(file_len);
-        file_hash.update(&mmap[start..end]);
-
-        total_length += info.length;
+        total_length += result.bytes_read as u64;
     }
 
     println!(
         "file\tsize={total_length}\ttrue={}\thash={}",
         file.metadata()?.len(),
-        file_hash.finalize().to_hex()
+        file_hash.to_hex()
     );
 
     Ok(())
