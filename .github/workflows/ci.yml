@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --all
+
+      - name: Run tests
+        run: cargo test --all --verbose
+
+      - name: Run extentria tests
+        run: cargo test -p extentria --verbose
+
+  clippy:
+    name: Clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+
+      - name: Run clippy on extentria
+        run: cargo clippy -p extentria -- -D warnings
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  # Linux-specific tests that require special filesystem features
+  linux-integration:
+    name: Linux Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            linux-cargo-integration-
+
+      - name: Run extentria integration tests
+        run: cargo test -p extentria --test integration --verbose
+
+      - name: Test sparse file handling
+        run: |
+          # Create a sparse file for testing
+          dd if=/dev/zero of=/tmp/sparse_test bs=1 count=0 seek=1M
+          ls -ls /tmp/sparse_test
+          # The sparse file exists; actual testing is done in Rust tests
+
+  # Cross-compilation check (verify code compiles for other targets)
+  cross-compile-check:
+    name: Cross-compile check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add targets
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          rustup target add aarch64-unknown-linux-gnu
+
+      - name: Check extentria for musl
+        run: cargo check -p extentria --target x86_64-unknown-linux-musl
+
+      - name: Check extentria for aarch64
+        run: cargo check -p extentria --target aarch64-unknown-linux-gnu
