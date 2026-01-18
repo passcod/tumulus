@@ -1,4 +1,4 @@
-use std::{convert::identity, fs::File, path::PathBuf};
+use std::{convert::identity, fs::File, io, path::PathBuf};
 
 use clap::Parser;
 use extentria::fiemap::FiemapLookup;
@@ -41,6 +41,7 @@ struct FileResult {
     total_read: u64,
     true_size: u64,
     sparse_bytes: u64,
+    extent_read_error: Option<io::Error>,
 }
 
 fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
@@ -57,6 +58,7 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
             total_read: 0,
             true_size: 0,
             sparse_bytes: 0,
+            extent_read_error: None,
         });
     }
 
@@ -64,40 +66,50 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
     let file_len = mmap.len();
 
     // Get extent information from FIEMAP and compute hashes
-    let raw_extents: Vec<(u64, u64, [u8; 32], String)> = FiemapLookup::extents_for_file(&file)?
-        .filter_map(|r| r.ok())
-        .map(|extent| {
-            let start = (extent.logical_offset as usize).min(file_len);
-            let end = (start + extent.length as usize).min(file_len);
-            let slice = &mmap[start..end];
-            let extent_id = *blake3::hash(slice).as_bytes();
+    // Collect extents until we hit an error, then stop but keep what we have
+    let mut raw_extents: Vec<(u64, u64, [u8; 32], String)> = Vec::new();
+    let mut extent_read_error: Option<io::Error> = None;
 
-            let flags = [
-                extent.encrypted().then_some("encrypted"),
-                extent.encoded().then_some("encoded"),
-                extent.inline().then_some("inline"),
-                extent.shared().then_some("shared"),
-                extent.delayed_allocation().then_some("delayed"),
-                extent.location_unknown().then_some("unknown"),
-                extent.not_aligned().then_some("unaligned"),
-                extent.packed().then_some("packed"),
-                extent.simulated().then_some("sim"),
-                extent.unwritten().then_some("unwritten"),
-                extent.last().then_some("last"),
-            ]
-            .into_iter()
-            .filter_map(identity)
-            .collect::<Vec<_>>()
-            .join(",");
+    for result in FiemapLookup::extents_for_file(&file)? {
+        match result {
+            Ok(extent) => {
+                let start = (extent.logical_offset as usize).min(file_len);
+                let end = (start + extent.length as usize).min(file_len);
+                let slice = &mmap[start..end];
+                let extent_id = *blake3::hash(slice).as_bytes();
 
-            (
-                extent.logical_offset,
-                (end - start) as u64,
-                extent_id,
-                flags,
-            )
-        })
-        .collect();
+                let flags = [
+                    extent.encrypted().then_some("encrypted"),
+                    extent.encoded().then_some("encoded"),
+                    extent.inline().then_some("inline"),
+                    extent.shared().then_some("shared"),
+                    extent.delayed_allocation().then_some("delayed"),
+                    extent.location_unknown().then_some("unknown"),
+                    extent.not_aligned().then_some("unaligned"),
+                    extent.packed().then_some("packed"),
+                    extent.simulated().then_some("sim"),
+                    extent.unwritten().then_some("unwritten"),
+                    extent.last().then_some("last"),
+                ]
+                .into_iter()
+                .filter_map(identity)
+                .collect::<Vec<_>>()
+                .join(",");
+
+                raw_extents.push((
+                    extent.logical_offset,
+                    (end - start) as u64,
+                    extent_id,
+                    flags,
+                ));
+            }
+            Err(err) => {
+                error!(?path, %err, extents_read = raw_extents.len(), "Error reading extents, stopping");
+                extent_read_error = Some(err);
+                break;
+            }
+        }
+    }
 
     // Convert to format needed by detect_sparse_holes
     let extents_for_holes: Vec<(u64, u64, [u8; 32])> = raw_extents
@@ -165,6 +177,7 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
         total_read,
         true_size,
         sparse_bytes,
+        extent_read_error,
     })
 }
 
@@ -213,14 +226,25 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     String::new()
                 };
 
+                let error_info = if file_result.extent_read_error.is_some() {
+                    "\t(incomplete due to error)"
+                } else {
+                    ""
+                };
+
                 println!(
-                    "{}\tfile\tsize={}\ttrue={}\thash={}{}",
+                    "{}\tfile\tsize={}\ttrue={}\thash={}{}{}",
                     file_result.path.display(),
                     file_result.total_read,
                     file_result.true_size,
                     file_result.file_hash,
                     sparse_info,
+                    error_info,
                 );
+
+                if file_result.extent_read_error.is_some() {
+                    had_errors = true;
+                }
             }
             Err(err) => {
                 had_errors = true;
