@@ -456,8 +456,8 @@ impl<'f> Iterator for FiemapSearchResults<'f> {
                     // this is what is actually used to continue the read
                     self.offset += result_size();
 
-                    // this is used to paginate
-                    self.next_search_offset = Some(result.physical_offset + 1);
+                    // this is used to paginate - use logical offset since fm_start is a file offset
+                    self.next_search_offset = Some(result.logical_offset + result.length);
 
                     // this is used to know when to stop reading
                     self.items_remaining_in_buf = self.items_remaining_in_buf.saturating_sub(1);
