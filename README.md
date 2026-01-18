@@ -106,7 +106,7 @@ Columns:
 - `unix_group_id` (unsigned integer, optional)
 - `unix_group_name` (text, optional)
 - `special` (jsonb, optional): if this is a special file (symlink, hardlink, device, etc), this info
-- `fs_inode` (integer, optiona): the inode of the file on the machine
+- `fs_inode` (integer, optional): the inode of the file on the machine
 - `extra` (jsonb, optional): any additional data
 
 Paths are normalised in that folder separators are always forward slashes (unix style), and Windows
