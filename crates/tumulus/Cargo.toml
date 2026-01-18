@@ -5,17 +5,6 @@ edition = "2024"
 
 [dependencies]
 blake3 = { version = "1.8.3", features = ["rayon"] }
-diesel = { version = "2.3.5", features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"] }
-diesel-async = { version = "0.7.4", features = ["migrations", "mobc"] }
-diesel-turso = { git = "https://github.com/Choochmeque/diesel_turso", features = ["mobc"] }
-diesel_migrations = "2.3.1"
 extentria.workspace = true
-facet = { version = "0.32.3", features = ["uuid", "jiff02"] }
-facet-format-json = "0.32.3"
-jiff = "0.2.16"
-miette = { version = "7.6.0", features = ["fancy"] }
-mobc = "0.9.0"
-tokio = { version = "1.48.0", features = ["full"] }
-uuid = { version = "1.19.0", features = ["v4", "serde"] }
 rayon = "1.10"
 memmap2 = "0.9"
