@@ -22,6 +22,8 @@ high amounts of files and fragmentation of said files.
 `fs_` fields are filled in when possible but are not required for the catalog to function; they are
 used to speed up a subsequent run, when the machine and filesystem IDs match.
 
+Catalogs have the `.tum` extension.
+
 ### `metadata` table
 
 Columns: `key` (text), `value` (jsonb)
