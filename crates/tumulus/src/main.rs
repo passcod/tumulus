@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs::{self, File},
     io,
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -45,19 +45,8 @@ struct FileInfo {
     special: Option<serde_json::Value>,
 }
 
-fn get_machine_id() -> [u8; 32] {
-    // Try to read machine-id, fall back to a hash of hostname
-    if let Ok(id) = fs::read_to_string("/etc/machine-id") {
-        let mut hasher = Hasher::new();
-        hasher.update(id.trim().as_bytes());
-        *hasher.finalize().as_bytes()
-    } else if let Ok(hostname) = fs::read_to_string("/etc/hostname") {
-        let mut hasher = Hasher::new();
-        hasher.update(hostname.trim().as_bytes());
-        *hasher.finalize().as_bytes()
-    } else {
-        [0u8; 32]
-    }
+fn get_machine_id() -> Result<String, Box<dyn std::error::Error>> {
+    machine_uid::get().map_err(|e| format!("Failed to get machine ID: {}", e).into())
 }
 
 fn process_file(path: &Path, source_root: &Path) -> io::Result<FileInfo> {
@@ -271,12 +260,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    let source_path = PathBuf::from(&args[1]);
+    let source_path = PathBuf::from(&args[1]).canonicalize()?;
     let catalog_path = PathBuf::from(&args[2]);
 
     let started = Timestamp::now();
     let catalog_id = Uuid::new_v4();
-    let machine_id = get_machine_id();
+    let machine_id = get_machine_id()?;
 
     eprintln!("Building catalog {} from {:?}", catalog_id, source_path);
 
@@ -323,7 +312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     conn.execute(
         "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-        params!["machine", json!(hex::encode(machine_id)).to_string()],
+        params!["machine", json!(machine_id).to_string()],
     )?;
     conn.execute(
         "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
@@ -345,17 +334,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
     )?;
 
+    // Deduplicate blobs before inserting - only process each unique blob once
+    // Also deduplicate extents within each blob by offset
+    let mut seen_blobs: HashMap<[u8; 32], Vec<&ExtentInfo>> = HashMap::new();
+    for file_info in &file_infos {
+        if let Some(ref blob) = file_info.blob {
+            seen_blobs.entry(blob.blob_id).or_insert_with(|| {
+                // Deduplicate extents by offset within this blob
+                let mut extents_by_offset: HashMap<u64, &ExtentInfo> = HashMap::new();
+                for extent in &blob.extents {
+                    extents_by_offset.entry(extent.offset).or_insert(extent);
+                }
+                extents_by_offset.into_values().collect()
+            });
+        }
+    }
+
+    // Also collect blob metadata (bytes, extent count) separately
+    let mut blob_metadata: HashMap<[u8; 32], (u64, usize)> = HashMap::new();
+    for file_info in &file_infos {
+        if let Some(ref blob) = file_info.blob {
+            blob_metadata.entry(blob.blob_id).or_insert_with(|| {
+                let extent_count = seen_blobs.get(&blob.blob_id).map(|e| e.len()).unwrap_or(0);
+                (blob.bytes, extent_count)
+            });
+        }
+    }
+
     // Insert extents, blobs, blob_extents, and files
     let tx = conn.unchecked_transaction()?;
 
     {
         let mut extent_stmt =
             tx.prepare("INSERT OR IGNORE INTO extents (extent_id, bytes) VALUES (?1, ?2)")?;
-        let mut blob_stmt = tx
-            .prepare("INSERT OR IGNORE INTO blobs (blob_id, bytes, extents) VALUES (?1, ?2, ?3)")?;
+        let mut blob_stmt =
+            tx.prepare("INSERT INTO blobs (blob_id, bytes, extents) VALUES (?1, ?2, ?3)")?;
         let mut blob_extent_stmt = tx.prepare(
-            "INSERT OR IGNORE INTO blob_extents (blob_id, extent_id, offset, bytes) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO blob_extents (blob_id, extent_id, offset, bytes) VALUES (?1, ?2, ?3, ?4)",
         )?;
+
+        // Insert unique blobs and their extents
+        for (blob_id, extents) in &seen_blobs {
+            let (bytes, extent_count) = blob_metadata.get(blob_id).copied().unwrap_or((0, 0));
+
+            // Insert extents
+            for extent in extents {
+                extent_stmt.execute(params![extent.extent_id.as_slice(), extent.bytes as i64])?;
+            }
+
+            // Insert blob
+            blob_stmt.execute(params![
+                blob_id.as_slice(),
+                bytes as i64,
+                extent_count as i64
+            ])?;
+
+            // Insert blob_extents
+            for extent in extents {
+                blob_extent_stmt.execute(params![
+                    blob_id.as_slice(),
+                    extent.extent_id.as_slice(),
+                    extent.offset as i64,
+                    extent.bytes as i64
+                ])?;
+            }
+        }
+
+        // Insert files
         let mut file_stmt = tx.prepare(
             r#"INSERT INTO files (
                 path, blob_id, ts_created, ts_changed, ts_modified, ts_accessed,
@@ -364,32 +409,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
         for file_info in &file_infos {
-            if let Some(ref blob) = file_info.blob {
-                // Insert extents
-                for extent in &blob.extents {
-                    extent_stmt
-                        .execute(params![extent.extent_id.as_slice(), extent.bytes as i64])?;
-                }
-
-                // Insert blob
-                blob_stmt.execute(params![
-                    blob.blob_id.as_slice(),
-                    blob.bytes as i64,
-                    blob.extents.len() as i64
-                ])?;
-
-                // Insert blob_extents
-                for extent in &blob.extents {
-                    blob_extent_stmt.execute(params![
-                        blob.blob_id.as_slice(),
-                        extent.extent_id.as_slice(),
-                        extent.offset as i64,
-                        extent.bytes as i64
-                    ])?;
-                }
-            }
-
-            // Insert file
             file_stmt.execute(params![
                 file_info.relative_path.as_bytes(),
                 file_info.blob.as_ref().map(|b| b.blob_id.as_slice()),
@@ -408,17 +427,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tx.commit()?;
 
+    // Calculate deduplication stats using SQL
+    let file_count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
+
+    let total_extents: i64 =
+        conn.query_row("SELECT COUNT(*) FROM blob_extents", [], |row| row.get(0))?;
+
+    let unique_extent_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM extents", [], |row| row.get(0))?;
+
+    let total_bytes: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(bytes), 0) FROM blob_extents",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let unique_bytes: i64 =
+        conn.query_row("SELECT COALESCE(SUM(bytes), 0) FROM extents", [], |row| {
+            row.get(0)
+        })?;
+
+    let dedup_ratio = if unique_bytes > 0 {
+        total_bytes as f64 / unique_bytes as f64
+    } else {
+        1.0
+    };
+
+    let space_saved = (total_bytes - unique_bytes).max(0);
+    let space_saved_pct = if total_bytes > 0 {
+        (space_saved as f64 / total_bytes as f64) * 100.0
+    } else {
+        0.0
+    };
+
     eprintln!("Catalog written to {:?}", catalog_path);
     eprintln!("  ID: {}", catalog_id);
     eprintln!("  Tree hash: {}", hex::encode(tree_hash));
-    eprintln!("  Files: {}", file_infos.len());
+    eprintln!("  Files: {}", file_count);
     eprintln!(
-        "  Extents: {}",
-        file_infos
-            .iter()
-            .filter_map(|f| f.blob.as_ref())
-            .map(|b| b.extents.len())
-            .sum::<usize>()
+        "  Extents: {} ({} unique)",
+        total_extents, unique_extent_count
+    );
+    eprintln!(
+        "  Total size: {} bytes ({} unique)",
+        total_bytes, unique_bytes
+    );
+    eprintln!(
+        "  Dedup ratio: {:.2}x ({:.1}% space saved, {} bytes)",
+        dedup_ratio, space_saved_pct, space_saved
     );
 
     Ok(())
