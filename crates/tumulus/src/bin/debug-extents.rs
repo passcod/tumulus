@@ -1,27 +1,33 @@
-use std::{convert::identity, fs::File};
+use std::{convert::identity, fs::File, path::PathBuf};
 
 use extentria::fiemap::FiemapLookup;
 use memmap2::Mmap;
 use rayon::prelude::*;
 
-struct ExtentInfo {
+struct FileExtent {
     logical_offset: u64,
     length: u64,
     flags: String,
 }
 
 struct ExtentResult {
-    info: ExtentInfo,
+    extent: FileExtent,
     hash: String,
     bytes_read: usize,
 }
 
-fn main() -> std::io::Result<()> {
-    let path = std::env::args().nth(1).expect("USAGE: debug-extents PATH");
+struct FileResult {
+    path: PathBuf,
+    extent_results: Vec<ExtentResult>,
+    file_hash: String,
+    total_read: u64,
+    true_size: u64,
+}
 
+fn process_file(path: PathBuf) -> std::io::Result<FileResult> {
     // Collect extent info first (FIEMAP is synchronous)
     let file = File::open(&path)?;
-    let extent_infos: Vec<ExtentInfo> = FiemapLookup::extents_for_file(&file)?
+    let extent_infos: Vec<FileExtent> = FiemapLookup::extents_for_file(&file)?
         .filter_map(|r| r.ok())
         .map(|extent| {
             let flags = [
@@ -42,7 +48,7 @@ fn main() -> std::io::Result<()> {
             .collect::<Vec<_>>()
             .join(",");
 
-            ExtentInfo {
+            FileExtent {
                 logical_offset: extent.logical_offset,
                 length: extent.length,
                 flags,
@@ -52,21 +58,22 @@ fn main() -> std::io::Result<()> {
 
     // Memory-map the file
     let file = File::open(&path)?;
+    let true_size = file.metadata()?.len();
     let mmap = unsafe { Mmap::map(&file)? };
     let file_len = mmap.len();
 
     // Process extents in parallel
-    let results: Vec<ExtentResult> = extent_infos
+    let extent_results: Vec<ExtentResult> = extent_infos
         .into_par_iter()
-        .map(|info| {
-            let start = (info.logical_offset as usize).min(file_len);
-            let end = (start + info.length as usize).min(file_len);
+        .map(|extent| {
+            let start = (extent.logical_offset as usize).min(file_len);
+            let end = (start + extent.length as usize).min(file_len);
             let slice = &mmap[start..end];
 
             let hash = blake3::hash(slice).to_hex().to_string();
 
             ExtentResult {
-                info,
+                extent,
                 hash,
                 bytes_read: end - start,
             }
@@ -76,31 +83,62 @@ fn main() -> std::io::Result<()> {
     // Compute file hash in parallel using update_rayon
     let mut file_hasher = blake3::Hasher::new();
     file_hasher.update_rayon(&mmap[..]);
-    let file_hash = file_hasher.finalize();
+    let file_hash = file_hasher.finalize().to_hex().to_string();
 
-    // Print results in order
-    let mut total_length = 0u64;
+    let total_read = extent_results.iter().map(|r| r.bytes_read as u64).sum();
 
-    for result in results {
-        let info = &result.info;
-        println!(
-            "extent start={:7}\tend={:7}\tsize={:7}\tflags={}\thash={}\tread={}",
-            info.logical_offset,
-            info.logical_offset + info.length,
-            info.length,
-            info.flags,
-            result.hash,
-            result.bytes_read,
-        );
+    Ok(FileResult {
+        path,
+        extent_results,
+        file_hash,
+        total_read,
+        true_size,
+    })
+}
 
-        total_length += result.bytes_read as u64;
+fn main() -> std::io::Result<()> {
+    let paths: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
+
+    if paths.is_empty() {
+        eprintln!("USAGE: debug-extents PATH [PATH...]");
+        std::process::exit(1);
     }
 
-    println!(
-        "file\tsize={total_length}\ttrue={}\thash={}",
-        file.metadata()?.len(),
-        file_hash.to_hex()
-    );
+    // Process all files in parallel
+    let results: Vec<_> = paths
+        .into_par_iter()
+        .map(|path| (path.clone(), process_file(path)))
+        .collect();
+
+    // Print results in order
+    for (path, result) in results {
+        match result {
+            Ok(file_result) => {
+                for er in &file_result.extent_results {
+                    println!(
+                        "{}\textent start={:7}\tend={:7}\tsize={:7}\tflags={}\thash={}\tread={}",
+                        file_result.path.display(),
+                        er.extent.logical_offset,
+                        er.extent.logical_offset + er.extent.length,
+                        er.extent.length,
+                        er.extent.flags,
+                        er.hash,
+                        er.bytes_read,
+                    );
+                }
+                println!(
+                    "{}\tfile\tsize={}\ttrue={}\thash={}",
+                    file_result.path.display(),
+                    file_result.total_read,
+                    file_result.true_size,
+                    file_result.file_hash,
+                );
+            }
+            Err(err) => {
+                eprintln!("{}\terror: {}", path.display(), err);
+            }
+        }
+    }
 
     Ok(())
 }
