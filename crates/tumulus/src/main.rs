@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -12,9 +13,9 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use tumulus::{
-    DEFAULT_COMPRESSION_LEVEL, FileInfo, compression::compress_file_with_level, compute_tree_hash,
-    create_catalog_schema, get_fs_info, get_hostname, get_machine_id, is_readonly, process_file,
-    write_catalog,
+    DEFAULT_COMPRESSION_LEVEL, FileInfo, RangeReader, compression::compress_file_with_level,
+    compute_tree_hash, create_catalog_schema, get_fs_info, get_hostname, get_machine_id,
+    is_readonly, process_file_with_reader, write_catalog,
 };
 
 #[derive(Parser, Debug)]
@@ -82,10 +83,20 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!(entries = paths.len(), "Found entries");
 
-    // Process files in parallel
+    // Thread-local RangeReader for buffer reuse within each rayon thread
+    thread_local! {
+        static RANGE_READER: RefCell<RangeReader> = RefCell::new(RangeReader::new());
+    }
+
+    // Process files in parallel, reusing buffers per-thread
     let results: Vec<_> = paths
         .par_iter()
-        .map(|path| (path.clone(), process_file(path, &source_path)))
+        .map(|path| {
+            let result = RANGE_READER.with(|reader| {
+                process_file_with_reader(path, &source_path, &mut reader.borrow_mut())
+            });
+            (path.clone(), result)
+        })
         .collect();
 
     // Collect successful results and handle errors

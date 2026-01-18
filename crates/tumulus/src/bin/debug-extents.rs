@@ -1,7 +1,7 @@
 use std::{fs::File, io, path::PathBuf};
 
 use clap::Parser;
-use extentria::{RangeReader, can_detect_shared};
+use extentria::{DataRange, RangeReader, can_detect_shared};
 use lloggs::LoggingArgs;
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -68,52 +68,48 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
     let mut extent_displays: Vec<ExtentDisplay> = Vec::new();
     let mut extent_read_error: Option<io::Error> = None;
 
-    match reader.read_ranges(&file) {
-        Ok(range_iter) => {
-            for result in range_iter {
-                match result {
-                    Ok(range) => {
-                        if range.flags.sparse {
-                            extent_displays.push(ExtentDisplay {
-                                logical_offset: range.offset,
-                                length: range.length,
-                                flags: "sparse".to_string(),
-                                is_sparse: true,
-                                hash: None,
-                                bytes_read: 0,
-                            });
-                        } else {
-                            let start = (range.offset as usize).min(file_len);
-                            let end = (start + range.length as usize).min(file_len);
-                            let slice = &mmap[start..end];
-                            let extent_id = blake3::hash(slice);
+    let ranges: Result<Vec<DataRange>, io::Error> = match reader.read_ranges(&file) {
+        Ok(iter) => iter.collect(),
+        Err(e) => Err(e),
+    };
 
-                            let mut flags = Vec::new();
-                            if range.flags.shared {
-                                flags.push("shared");
-                            }
-                            let flags_str = flags.join(",");
+    match ranges {
+        Ok(range_list) => {
+            for range in range_list {
+                if range.flags.sparse {
+                    extent_displays.push(ExtentDisplay {
+                        logical_offset: range.offset,
+                        length: range.length,
+                        flags: "sparse".to_string(),
+                        is_sparse: true,
+                        hash: None,
+                        bytes_read: 0,
+                    });
+                } else {
+                    let start = (range.offset as usize).min(file_len);
+                    let end = (start + range.length as usize).min(file_len);
+                    let slice = &mmap[start..end];
+                    let extent_id = blake3::hash(slice);
 
-                            extent_displays.push(ExtentDisplay {
-                                logical_offset: range.offset,
-                                length: (end - start) as u64,
-                                flags: flags_str,
-                                is_sparse: false,
-                                hash: Some(hex::encode(extent_id.as_bytes())),
-                                bytes_read: end - start,
-                            });
-                        }
+                    let mut flags = Vec::new();
+                    if range.flags.shared {
+                        flags.push("shared");
                     }
-                    Err(err) => {
-                        error!(?path, %err, extents_read = extent_displays.len(), "Error reading extents, stopping");
-                        extent_read_error = Some(err);
-                        break;
-                    }
+                    let flags_str = flags.join(",");
+
+                    extent_displays.push(ExtentDisplay {
+                        logical_offset: range.offset,
+                        length: (end - start) as u64,
+                        flags: flags_str,
+                        is_sparse: false,
+                        hash: Some(hex::encode(extent_id.as_bytes())),
+                        bytes_read: end - start,
+                    });
                 }
             }
         }
         Err(err) => {
-            error!(?path, %err, "Error starting extent read");
+            error!(?path, %err, "Error reading extents");
             extent_read_error = Some(err);
         }
     }

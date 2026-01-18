@@ -16,8 +16,12 @@ pub use compression::{
     DEFAULT_COMPRESSION_LEVEL, compress_catalog_in_place, compress_file, decompress_file,
     is_zstd_compressed, open_catalog,
 };
-pub use extents::{BlobInfo, ExtentInfo, detect_sparse_holes, process_file_extents};
-pub use file::{FileInfo, process_file};
+pub use extentria::RangeReader;
+pub use extents::{
+    BlobInfo, ExtentInfo, detect_sparse_holes, process_file_extents,
+    process_file_extents_with_reader,
+};
+pub use file::{FileInfo, process_file, process_file_with_reader};
 pub use fsinfo::{FsInfo, get_fs_info, get_hostname, is_readonly};
 pub use machine::get_machine_id;
 pub use tree::compute_tree_hash;
