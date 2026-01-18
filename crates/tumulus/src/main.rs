@@ -7,20 +7,42 @@ use std::{
 };
 
 use blake3::Hasher;
+use clap::Parser;
 use extentria::fiemap::FiemapLookup;
 use jiff::Timestamp;
+use lloggs::LoggingArgs;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use rusqlite::{Connection, params};
 use serde_json::json;
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
+
+#[derive(Parser, Debug)]
+#[command(name = "tumulus")]
+#[command(about = "Build a snapshot catalog from a directory tree")]
+struct Args {
+    /// Source directory to catalog
+    source_path: PathBuf,
+
+    /// Output catalog file path
+    catalog_output: PathBuf,
+
+    /// Make extent read errors fatal (exit on first error)
+    #[arg(long, short = 'e')]
+    fatal_errors: bool,
+
+    #[command(flatten)]
+    logging: LoggingArgs,
+}
 
 /// Information about a file extent
 struct ExtentInfo {
     extent_id: [u8; 32],
     offset: u64,
     bytes: u64,
+    is_sparse: bool,
 }
 
 /// Information about a file's blob
@@ -45,8 +67,58 @@ struct FileInfo {
     special: Option<serde_json::Value>,
 }
 
-fn get_machine_id() -> Result<String, Box<dyn std::error::Error>> {
+fn get_machine_id() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     machine_uid::get().map_err(|e| format!("Failed to get machine ID: {}", e).into())
+}
+
+fn detect_sparse_holes(extents: &[(u64, u64, [u8; 32])], file_size: u64) -> Vec<ExtentInfo> {
+    let mut result = Vec::new();
+    let mut current_pos: u64 = 0;
+
+    for (logical_offset, length, extent_id) in extents {
+        // If there's a gap before this extent, it's a sparse hole
+        if *logical_offset > current_pos {
+            let hole_size = logical_offset - current_pos;
+            debug!(
+                offset = current_pos,
+                size = hole_size,
+                "Detected sparse hole"
+            );
+            result.push(ExtentInfo {
+                extent_id: [0u8; 32], // Sparse extents have no ID
+                offset: current_pos,
+                bytes: hole_size,
+                is_sparse: true,
+            });
+        }
+
+        result.push(ExtentInfo {
+            extent_id: *extent_id,
+            offset: *logical_offset,
+            bytes: *length,
+            is_sparse: false,
+        });
+
+        current_pos = logical_offset + length;
+    }
+
+    // Check for trailing sparse hole
+    if current_pos < file_size {
+        let hole_size = file_size - current_pos;
+        debug!(
+            offset = current_pos,
+            size = hole_size,
+            "Detected trailing sparse hole"
+        );
+        result.push(ExtentInfo {
+            extent_id: [0u8; 32],
+            offset: current_pos,
+            bytes: hole_size,
+            is_sparse: true,
+        });
+    }
+
+    result
 }
 
 fn process_file(path: &Path, source_root: &Path) -> io::Result<FileInfo> {
@@ -108,6 +180,8 @@ fn process_file(path: &Path, source_root: &Path) -> io::Result<FileInfo> {
 }
 
 fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
+    debug!(?path, "Processing file extents");
+
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
 
@@ -122,11 +196,21 @@ fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
     let mmap = unsafe { Mmap::map(&file)? };
 
     // Get extent information from FIEMAP
-    let extent_infos: Vec<_> = FiemapLookup::extents_for_file(&file)?
-        .filter_map(|r| r.ok())
+    let extent_results: Result<Vec<_>, _> = FiemapLookup::extents_for_file(&file)?
+        .map(|r| {
+            r.map(|extent| {
+                let start = (extent.logical_offset as usize).min(mmap.len());
+                let end = (start + extent.length as usize).min(mmap.len());
+                let slice = &mmap[start..end];
+                let extent_id = *blake3::hash(slice).as_bytes();
+                (extent.logical_offset, (end - start) as u64, extent_id)
+            })
+        })
         .collect();
 
-    if extent_infos.is_empty() {
+    let raw_extents = extent_results?;
+
+    if raw_extents.is_empty() {
         // No extents reported, treat whole file as one extent
         let extent_id = *blake3::hash(&mmap[..]).as_bytes();
         let mut blob_hasher = Hasher::new();
@@ -140,26 +224,13 @@ fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
                 extent_id,
                 offset: 0,
                 bytes: file_len,
+                is_sparse: false,
             }],
         }));
     }
 
-    // Process extents in parallel
-    let extents: Vec<ExtentInfo> = extent_infos
-        .par_iter()
-        .map(|extent| {
-            let start = (extent.logical_offset as usize).min(mmap.len());
-            let end = (start + extent.length as usize).min(mmap.len());
-            let slice = &mmap[start..end];
-            let extent_id = *blake3::hash(slice).as_bytes();
-
-            ExtentInfo {
-                extent_id,
-                offset: extent.logical_offset,
-                bytes: (end - start) as u64,
-            }
-        })
-        .collect();
+    // Detect sparse holes
+    let extents = detect_sparse_holes(&raw_extents, file_len);
 
     // Compute blob hash (hash of full file contents)
     let mut blob_hasher = Hasher::new();
@@ -253,21 +324,23 @@ fn compute_tree_hash(files: &[FileInfo]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("USAGE: tumulus <source_path> <catalog_output>");
-        std::process::exit(1);
-    }
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let args = Args::parse();
+    let _guard = args.logging.setup(|v| match v {
+        0 => "warn",
+        1 => "info",
+        2 => "debug",
+        _ => "trace",
+    })?;
 
-    let source_path = PathBuf::from(&args[1]).canonicalize()?;
-    let catalog_path = PathBuf::from(&args[2]);
+    let source_path = args.source_path.canonicalize()?;
+    let catalog_path = &args.catalog_output;
 
     let started = Timestamp::now();
     let catalog_id = Uuid::new_v4();
     let machine_id = get_machine_id()?;
 
-    eprintln!("Building catalog {} from {:?}", catalog_id, source_path);
+    info!(?catalog_id, ?source_path, "Building catalog");
 
     // Collect all file paths first
     let paths: Vec<PathBuf> = WalkDir::new(&source_path)
@@ -276,27 +349,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|e| e.into_path())
         .collect();
 
-    eprintln!("Found {} entries", paths.len());
+    info!(entries = paths.len(), "Found entries");
 
     // Process files in parallel
-    let file_infos: Vec<FileInfo> = paths
+    let results: Vec<_> = paths
         .par_iter()
-        .filter_map(|path| match process_file(path, &source_path) {
-            Ok(info) => Some(info),
-            Err(err) => {
-                eprintln!("Error processing {:?}: {}", path, err);
-                None
-            }
-        })
+        .map(|path| (path.clone(), process_file(path, &source_path)))
         .collect();
 
-    eprintln!("Processed {} files", file_infos.len());
+    // Collect successful results and handle errors
+    let mut file_infos: Vec<FileInfo> = Vec::new();
+    let mut error_count = 0;
+
+    for (path, result) in results {
+        match result {
+            Ok(info) => file_infos.push(info),
+            Err(err) => {
+                error_count += 1;
+                if args.fatal_errors {
+                    error!(?path, %err, "Fatal error processing file");
+                    return Err(err.into());
+                } else {
+                    warn!(?path, %err, "Skipping file due to error");
+                }
+            }
+        }
+    }
+
+    if error_count > 0 {
+        warn!(error_count, "Some files were skipped due to errors");
+    }
+
+    info!(files = file_infos.len(), "Processed files");
 
     // Compute tree hash
     let tree_hash = compute_tree_hash(&file_infos);
 
     // Create the catalog database
-    let conn = Connection::open(&catalog_path)?;
+    let conn = Connection::open(catalog_path)?;
     create_catalog_schema(&conn)?;
 
     let created = Timestamp::now();
@@ -377,9 +467,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (blob_id, extents) in &seen_blobs {
             let (bytes, extent_count) = blob_metadata.get(blob_id).copied().unwrap_or((0, 0));
 
-            // Insert extents
+            // Insert extents (skip sparse holes - they have no extent_id)
             for extent in extents {
-                extent_stmt.execute(params![extent.extent_id.as_slice(), extent.bytes as i64])?;
+                if !extent.is_sparse {
+                    extent_stmt
+                        .execute(params![extent.extent_id.as_slice(), extent.bytes as i64])?;
+                }
             }
 
             // Insert blob
@@ -389,11 +482,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 extent_count as i64
             ])?;
 
-            // Insert blob_extents
+            // Insert blob_extents (include sparse holes with null extent_id)
             for extent in extents {
+                let extent_id: Option<&[u8]> = if extent.is_sparse {
+                    None
+                } else {
+                    Some(extent.extent_id.as_slice())
+                };
                 blob_extent_stmt.execute(params![
                     blob_id.as_slice(),
-                    extent.extent_id.as_slice(),
+                    extent_id,
                     extent.offset as i64,
                     extent.bytes as i64
                 ])?;
@@ -437,7 +535,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         conn.query_row("SELECT COUNT(*) FROM extents", [], |row| row.get(0))?;
 
     let total_bytes: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(bytes), 0) FROM blob_extents",
+        "SELECT COALESCE(SUM(bytes), 0) FROM blob_extents WHERE extent_id IS NOT NULL",
         [],
         |row| row.get(0),
     )?;
@@ -446,6 +544,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         conn.query_row("SELECT COALESCE(SUM(bytes), 0) FROM extents", [], |row| {
             row.get(0)
         })?;
+
+    let sparse_bytes: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(bytes), 0) FROM blob_extents WHERE extent_id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
 
     let dedup_ratio = if unique_bytes > 0 {
         total_bytes as f64 / unique_bytes as f64
@@ -460,6 +564,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0.0
     };
 
+    info!(?catalog_path, "Catalog written");
     eprintln!("Catalog written to {:?}", catalog_path);
     eprintln!("  ID: {}", catalog_id);
     eprintln!("  Tree hash: {}", hex::encode(tree_hash));
@@ -472,6 +577,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "  Total size: {} bytes ({} unique)",
         total_bytes, unique_bytes
     );
+    if sparse_bytes > 0 {
+        eprintln!("  Sparse holes: {} bytes", sparse_bytes);
+    }
     eprintln!(
         "  Dedup ratio: {:.2}x ({:.1}% space saved, {} bytes)",
         dedup_ratio, space_saved_pct, space_saved
