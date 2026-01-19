@@ -68,6 +68,7 @@ pub fn create_catalog_schema(conn: &Connection) -> rusqlite::Result<()> {
             extent_id BLOB,
             offset INTEGER NOT NULL,
             bytes INTEGER NOT NULL,
+            fs_extent INTEGER NOT NULL,
             PRIMARY KEY (blob_id, offset)
         );
         CREATE INDEX IF NOT EXISTS idx_blob_extents_blob ON blob_extents(blob_id);
@@ -142,7 +143,7 @@ pub fn write_catalog(conn: &Connection, file_infos: &[FileInfo]) -> rusqlite::Re
         let mut blob_stmt =
             tx.prepare("INSERT INTO blobs (blob_id, bytes, extents) VALUES (?1, ?2, ?3)")?;
         let mut blob_extent_stmt = tx.prepare(
-            "INSERT INTO blob_extents (blob_id, extent_id, offset, bytes) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO blob_extents (blob_id, extent_id, offset, bytes, fs_extent) VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
 
         // Insert unique blobs and their extents
@@ -175,7 +176,8 @@ pub fn write_catalog(conn: &Connection, file_infos: &[FileInfo]) -> rusqlite::Re
                     blob_id.as_slice(),
                     extent_id,
                     extent.offset as i64,
-                    extent.bytes as i64
+                    extent.bytes as i64,
+                    extent.fs_extent as i64
                 ])?;
             }
         }

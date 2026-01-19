@@ -18,7 +18,7 @@ pub use compression::{
 };
 pub use extentria::RangeReader;
 pub use extents::{
-    BlobInfo, ExtentInfo, detect_sparse_holes, process_file_extents,
+    BlobInfo, ExtentInfo, MAX_EXTENT_SIZE, detect_sparse_holes, process_file_extents,
     process_file_extents_with_reader,
 };
 pub use file::{FileInfo, process_file, process_file_with_reader};
