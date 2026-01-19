@@ -140,13 +140,14 @@ impl Iterator for FiemapRangeIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         use crate::types::RangeFlags;
 
-        if self.done {
-            return None;
-        }
-
-        // Return any pending range first
+        // Return any pending range first, even if done is set
+        // This handles the case where we set done=true while storing a pending range
         if let Some(range) = self.pending_range.take() {
             return Some(Ok(range));
+        }
+
+        if self.done {
+            return None;
         }
 
         match self.inner.next() {
