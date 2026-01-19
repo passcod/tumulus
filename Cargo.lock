@@ -2036,6 +2036,7 @@ dependencies = [
  "futures",
  "hex",
  "lloggs",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2046,6 +2047,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tumulus",
  "uuid",
  "zstd",
 ]
