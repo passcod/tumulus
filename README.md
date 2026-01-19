@@ -66,9 +66,14 @@ Columns:
 - `extent_id` (blob, nullable): if null, this part of the blob is sparse
 - `offset` (unsigned integer): offset in bytes
 - `bytes` (unsigned integer): size of the extent in bytes
+- `fs_extent` (unsigned integer): will be the same value for subchunked extents
 
 A sparse extent is not stored, and reading it would return zeroes.
 It's illegal to have `bytes = 0` and `extent_id` not null.
+
+When an extent on disk is large, we chunk it down "virtually" into smaller extents. This provides
+better performance and granularity on the upload/download phases. The `fs_extent` field is used to
+be able to restore data efficiently in supported filesystems.
 
 Indexes:
 
