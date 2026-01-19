@@ -505,6 +505,127 @@ mod linux_tests {
 }
 
 // ============================================================================
+// Fallback behavior tests (Linux-specific)
+// ============================================================================
+
+#[cfg(target_os = "linux")]
+mod fallback_tests {
+    use super::*;
+
+    /// Test that files on tmpfs (which doesn't support FIEMAP) fall back correctly.
+    ///
+    /// This test creates a file in /tmp (typically tmpfs on Linux) and verifies
+    /// that we can still read its ranges even though FIEMAP isn't supported.
+    #[test]
+    fn test_tmpfs_fallback() {
+        // /tmp is typically tmpfs on Linux
+        let temp_dir = tempfile::Builder::new()
+            .prefix("extentria-test-")
+            .tempdir_in("/tmp")
+            .unwrap();
+
+        let test_file = temp_dir.path().join("test.txt");
+        let content = b"Hello, tmpfs fallback test!";
+        fs::write(&test_file, content).unwrap();
+
+        let file = File::open(&test_file).unwrap();
+        let mut reader = RangeReader::new();
+
+        // This should now succeed via fallback instead of failing with EOPNOTSUPP
+        let result = reader.read_ranges(&file);
+        assert!(
+            result.is_ok(),
+            "read_ranges should succeed on tmpfs via fallback"
+        );
+
+        let ranges: Result<Vec<_>, _> = result.unwrap().collect();
+        assert!(ranges.is_ok(), "Iterator should not produce errors");
+
+        let ranges = ranges.unwrap();
+        assert_eq!(
+            ranges.len(),
+            1,
+            "Should have exactly one range (fallback treats file as single extent)"
+        );
+
+        let range = &ranges[0];
+        assert_eq!(range.offset, 0, "Range should start at offset 0");
+        assert_eq!(
+            range.length,
+            content.len() as u64,
+            "Range length should match file size"
+        );
+        assert!(
+            !range.flags.sparse,
+            "Fallback range should not be marked sparse"
+        );
+        assert!(
+            !range.flags.shared,
+            "Fallback range should not be marked shared"
+        );
+    }
+
+    /// Test that the fallback works correctly for empty files on tmpfs.
+    #[test]
+    fn test_tmpfs_fallback_empty_file() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("extentria-test-")
+            .tempdir_in("/tmp")
+            .unwrap();
+
+        let test_file = temp_dir.path().join("empty.txt");
+        fs::write(&test_file, b"").unwrap();
+
+        let file = File::open(&test_file).unwrap();
+        let mut reader = RangeReader::new();
+
+        let result = reader.read_ranges(&file);
+        assert!(
+            result.is_ok(),
+            "read_ranges should succeed for empty file on tmpfs"
+        );
+
+        let ranges: Result<Vec<_>, _> = result.unwrap().collect();
+        assert!(ranges.is_ok(), "Iterator should not produce errors");
+
+        let ranges = ranges.unwrap();
+        assert!(ranges.is_empty(), "Empty file should have no ranges");
+    }
+
+    /// Test that RangeReader can be reused across files on tmpfs.
+    #[test]
+    fn test_tmpfs_fallback_reader_reuse() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("extentria-test-")
+            .tempdir_in("/tmp")
+            .unwrap();
+
+        let file1_path = temp_dir.path().join("file1.txt");
+        let file2_path = temp_dir.path().join("file2.txt");
+        fs::write(&file1_path, b"First file content").unwrap();
+        fs::write(&file2_path, b"Second file").unwrap();
+
+        let mut reader = RangeReader::new();
+
+        // Read first file
+        let file1 = File::open(&file1_path).unwrap();
+        let result1 = reader.read_ranges(&file1);
+        assert!(result1.is_ok());
+        let ranges1: Vec<_> = result1.unwrap().filter_map(|r| r.ok()).collect();
+        assert_eq!(ranges1.len(), 1);
+        assert_eq!(ranges1[0].length, 18); // "First file content"
+
+        // Read second file with same reader
+        let file2 = File::open(&file2_path).unwrap();
+        let result2 = reader.read_ranges(&file2);
+        assert!(result2.is_ok());
+        let ranges2: Vec<_> = result2.unwrap().filter_map(|r| r.ok()).collect();
+        assert_eq!(ranges2.len(), 1);
+        assert_eq!(ranges2[0].length, 11); // "Second file"
+    }
+}
+
+// ============================================================================
 // Error handling tests
 // ============================================================================
 

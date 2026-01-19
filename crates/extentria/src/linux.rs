@@ -3,7 +3,7 @@ use std::io;
 use std::os::fd::AsFd;
 
 use crate::fiemap::FiemapLookup;
-use crate::types::{DataRange, RangeFlags};
+use crate::types::DataRange;
 
 /// Range reader for Linux using FIEMAP.
 pub struct RangeReader {
@@ -43,29 +43,90 @@ impl RangeReader {
     }
 
     /// Read data ranges for a file.
+    ///
+    /// If the filesystem doesn't support FIEMAP (e.g., tmpfs, some network filesystems),
+    /// this will fall back to treating the entire file as a single data range.
     pub fn read_ranges<'a>(
         &'a mut self,
         file: &'a File,
     ) -> io::Result<impl Iterator<Item = io::Result<DataRange>> + 'a> {
         let file_size = file.metadata()?.len();
 
-        let results = if let Some(buf) = self.buf.take() {
-            FiemapLookup::for_file_size(file_size).with_buf(file.as_fd(), buf)?
+        let fiemap_result = if let Some(buf) = self.buf.take() {
+            FiemapLookup::for_file_size(file_size).with_buf(file.as_fd(), buf)
         } else {
-            FiemapLookup::for_file_size(file_size).with_buf_size(file.as_fd(), self.buf_size)?
+            FiemapLookup::for_file_size(file_size).with_buf_size(file.as_fd(), self.buf_size)
         };
 
-        Ok(LinuxRangeIter {
-            inner: results,
-            file_size,
-            current_pos: 0,
-            pending_range: None,
-            done: false,
-        })
+        match fiemap_result {
+            Ok(results) => Ok(LinuxRangeIter::Fiemap(FiemapRangeIter {
+                inner: results,
+                file_size,
+                current_pos: 0,
+                pending_range: None,
+                done: false,
+            })),
+            Err(e) if is_fiemap_unsupported(&e) => {
+                // Filesystem doesn't support FIEMAP, fall back to single extent
+                Ok(LinuxRangeIter::Fallback(FallbackRangeIter::new(file_size)))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
-struct LinuxRangeIter<'a> {
+/// Check if an error indicates FIEMAP is not supported by this filesystem.
+fn is_fiemap_unsupported(err: &io::Error) -> bool {
+    // Note: ENOTSUP and EOPNOTSUPP are the same value on Linux
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY)
+    )
+}
+
+/// Iterator that can be either FIEMAP-based or fallback.
+enum LinuxRangeIter<'a> {
+    Fiemap(FiemapRangeIter<'a>),
+    Fallback(FallbackRangeIter),
+}
+
+impl Iterator for LinuxRangeIter<'_> {
+    type Item = io::Result<DataRange>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            LinuxRangeIter::Fiemap(iter) => iter.next(),
+            LinuxRangeIter::Fallback(iter) => iter.next(),
+        }
+    }
+}
+
+/// Fallback iterator that treats the whole file as a single data range.
+struct FallbackRangeIter {
+    range: Option<DataRange>,
+}
+
+impl FallbackRangeIter {
+    fn new(file_size: u64) -> Self {
+        let range = if file_size > 0 {
+            Some(DataRange::new(0, file_size))
+        } else {
+            None
+        };
+        Self { range }
+    }
+}
+
+impl Iterator for FallbackRangeIter {
+    type Item = io::Result<DataRange>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.range.take().map(Ok)
+    }
+}
+
+/// Iterator over FIEMAP results, converting to DataRange.
+struct FiemapRangeIter<'a> {
     inner: crate::fiemap::FiemapSearchResults<'a>,
     file_size: u64,
     current_pos: u64,
@@ -73,10 +134,12 @@ struct LinuxRangeIter<'a> {
     done: bool,
 }
 
-impl Iterator for LinuxRangeIter<'_> {
+impl Iterator for FiemapRangeIter<'_> {
     type Item = io::Result<DataRange>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        use crate::types::RangeFlags;
+
         if self.done {
             return None;
         }
