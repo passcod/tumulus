@@ -651,7 +651,18 @@ fn test_closed_file_handle() {
 #[test]
 fn test_directory_handling() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let dir = File::open(temp_dir.path()).unwrap();
+
+    // On Windows, opening a directory with File::open() fails with "Access is denied"
+    // This is expected behavior - Windows requires special flags to open directories
+    let dir = match File::open(temp_dir.path()) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            // Expected on Windows
+            eprintln!("Skipping: cannot open directory as file on this platform");
+            return;
+        }
+        Err(e) => panic!("Unexpected error opening directory: {e}"),
+    };
 
     // Trying to get ranges for a directory should fail or return empty
     match ranges_for_file(&dir) {
