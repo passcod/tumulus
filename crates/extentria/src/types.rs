@@ -30,6 +30,7 @@ pub trait RangeReaderImpl: std::fmt::Debug + Default + private::Sealed {
     /// Create a reader reusing an existing buffer.
     ///
     /// On platforms that don't use buffers, the buffer is ignored.
+    #[allow(clippy::boxed_local, reason = "it's the desired interface, dumbass")]
     fn with_buffer(buf: Box<[u8]>) -> Self {
         let _ = buf;
         Self::new()
