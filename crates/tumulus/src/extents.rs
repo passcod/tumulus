@@ -3,7 +3,7 @@
 use std::{fs::File, io, path::Path};
 
 use blake3::Hasher;
-use extentria::{DataRange, RangeReader};
+use extentria::{DataRange, RangeReader, RangeReaderImpl};
 use memmap2::Mmap;
 use tracing::debug;
 

@@ -16,7 +16,7 @@ pub use compression::{
     DEFAULT_COMPRESSION_LEVEL, compress_catalog_in_place, compress_file, decompress_file,
     is_zstd_compressed, open_catalog,
 };
-pub use extentria::RangeReader;
+pub use extentria::{RangeReader, RangeReaderImpl};
 pub use extents::{
     BlobInfo, ExtentInfo, MAX_EXTENT_SIZE, detect_sparse_holes, process_file_extents,
     process_file_extents_with_reader,

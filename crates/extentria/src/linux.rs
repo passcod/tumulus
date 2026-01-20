@@ -3,17 +3,20 @@ use std::io;
 use std::os::fd::AsFd;
 
 use crate::fiemap::FiemapLookup;
-use crate::types::DataRange;
+use crate::types::{DataRange, RangeIter, RangeReaderImpl, private::Sealed};
 
 /// Range reader for Linux using FIEMAP.
+#[derive(Debug)]
 pub struct RangeReader {
     buf_size: usize,
     buf: Option<Box<[u8]>>,
 }
 
-impl RangeReader {
+impl Sealed for RangeReader {}
+
+impl RangeReaderImpl for RangeReader {
     /// Create a new reader with default buffer size.
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             buf_size: 64 * 1024, // 64KB default
             buf: None,
@@ -21,7 +24,7 @@ impl RangeReader {
     }
 
     /// Create a reader with a specific buffer size.
-    pub fn with_buffer_size(size: usize) -> Self {
+    fn with_buffer_size(size: usize) -> Self {
         Self {
             buf_size: size,
             buf: None,
@@ -29,7 +32,7 @@ impl RangeReader {
     }
 
     /// Create a reader reusing an existing buffer.
-    pub fn with_buffer(buf: Box<[u8]>) -> Self {
+    fn with_buffer(buf: Box<[u8]>) -> Self {
         let buf_size = buf.len();
         Self {
             buf_size,
@@ -38,7 +41,7 @@ impl RangeReader {
     }
 
     /// Consume the reader and return its buffer for reuse.
-    pub fn into_buffer(self) -> Option<Box<[u8]>> {
+    fn into_buffer(self) -> Option<Box<[u8]>> {
         self.buf
     }
 
@@ -46,10 +49,7 @@ impl RangeReader {
     ///
     /// If the filesystem doesn't support FIEMAP (e.g., tmpfs, some network filesystems),
     /// this will fall back to treating the entire file as a single data range.
-    pub fn read_ranges<'a>(
-        &'a mut self,
-        file: &'a File,
-    ) -> io::Result<impl Iterator<Item = io::Result<DataRange>> + 'a> {
+    fn read_ranges<'a>(&'a mut self, file: &'a File) -> io::Result<RangeIter<'a>> {
         let file_size = file.metadata()?.len();
 
         let fiemap_result = if let Some(buf) = self.buf.take() {
@@ -59,16 +59,18 @@ impl RangeReader {
         };
 
         match fiemap_result {
-            Ok(results) => Ok(LinuxRangeIter::Fiemap(FiemapRangeIter {
+            Ok(results) => Ok(Box::new(LinuxRangeIter::Fiemap(FiemapRangeIter {
                 inner: results,
                 file_size,
                 current_pos: 0,
                 pending_range: None,
                 done: false,
-            })),
+            }))),
             Err(e) if is_fiemap_unsupported(&e) => {
                 // Filesystem doesn't support FIEMAP, fall back to single extent
-                Ok(LinuxRangeIter::Fallback(FallbackRangeIter::new(file_size)))
+                Ok(Box::new(LinuxRangeIter::Fallback(FallbackRangeIter::new(
+                    file_size,
+                ))))
             }
             Err(e) => Err(e),
         }

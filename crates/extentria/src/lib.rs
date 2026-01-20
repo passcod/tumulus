@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io;
 
 mod types;
-pub use types::{DataRange, RangeFlags};
+pub use types::{DataRange, RangeFlags, RangeIter, RangeReaderImpl};
 
 // Platform-specific implementations
 #[cfg(target_os = "linux")]
@@ -61,6 +61,7 @@ pub use fallback::RangeReader;
 /// For processing multiple files, consider using [`RangeReader`] directly
 /// to reuse buffers between calls.
 pub fn ranges_for_file(file: &File) -> io::Result<Vec<DataRange>> {
+    use crate::types::RangeReaderImpl as _;
     let mut reader = RangeReader::new();
     reader.read_ranges(file)?.collect()
 }

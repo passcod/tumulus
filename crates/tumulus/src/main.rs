@@ -12,9 +12,9 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use tumulus::{
-    DEFAULT_COMPRESSION_LEVEL, FileInfo, RangeReader, compression::compress_file_with_level,
-    compute_tree_hash, create_catalog_schema, get_fs_info, get_hostname, get_machine_id,
-    is_readonly, process_file_with_reader, write_catalog,
+    DEFAULT_COMPRESSION_LEVEL, FileInfo, RangeReader, RangeReaderImpl,
+    compression::compress_file_with_level, compute_tree_hash, create_catalog_schema, get_fs_info,
+    get_hostname, get_machine_id, is_readonly, process_file_with_reader, write_catalog,
 };
 
 #[derive(Parser, Debug)]

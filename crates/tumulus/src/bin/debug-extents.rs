@@ -1,7 +1,7 @@
 use std::{fs::File, io, path::PathBuf};
 
 use clap::Parser;
-use extentria::{DataRange, RangeReader, can_detect_shared};
+use extentria::{DataRange, RangeReader, RangeReaderImpl, can_detect_shared};
 use lloggs::LoggingArgs;
 use memmap2::Mmap;
 use rayon::prelude::*;

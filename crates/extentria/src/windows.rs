@@ -8,7 +8,7 @@ use windows_sys::Win32::System::Ioctl::{
     FILE_ALLOCATED_RANGE_BUFFER, FSCTL_QUERY_ALLOCATED_RANGES,
 };
 
-use crate::types::DataRange;
+use crate::types::{DataRange, RangeIter, RangeReaderImpl, private::Sealed};
 
 /// Minimum buffer size: enough for the input struct plus at least a few results.
 const MIN_BUFFER_SIZE: usize = std::mem::size_of::<FILE_ALLOCATED_RANGE_BUFFER>() * 16;
@@ -18,14 +18,17 @@ const MIN_BUFFER_SIZE: usize = std::mem::size_of::<FILE_ALLOCATED_RANGE_BUFFER>(
 /// This implementation uses a raw byte buffer that can be reused across multiple
 /// file lookups to minimize allocations. Results are yielded lazily via an iterator
 /// that paginates through the kernel's results on demand.
+#[derive(Debug)]
 pub struct RangeReader {
     buffer: Option<Box<[u8]>>,
     buffer_size: usize,
 }
 
-impl RangeReader {
+impl Sealed for RangeReader {}
+
+impl RangeReaderImpl for RangeReader {
     /// Create a new reader with default buffer size (64KB).
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self::with_buffer_size(64 * 1024)
     }
 
@@ -33,7 +36,7 @@ impl RangeReader {
     ///
     /// The buffer size determines how many extent results can be held at once.
     /// Larger buffers mean fewer system calls for files with many extents.
-    pub fn with_buffer_size(size: usize) -> Self {
+    fn with_buffer_size(size: usize) -> Self {
         let size = size.max(MIN_BUFFER_SIZE);
         Self {
             buffer: None,
@@ -45,8 +48,9 @@ impl RangeReader {
     ///
     /// This allows buffer reuse across multiple files or even multiple `RangeReader`
     /// instances. The buffer will be used as-is for the next `read_ranges` call.
-    pub fn with_buffer(buf: Box<[u8]>) -> Self {
-        let buffer_size = buf.len().max(MIN_BUFFER_SIZE);
+    fn with_buffer(buf: Box<[u8]>) -> Self {
+        let buffer_size = buf.len();
+        debug_assert!(buffer_size >= MIN_BUFFER_SIZE);
         Self {
             buffer: Some(buf),
             buffer_size,
@@ -57,7 +61,7 @@ impl RangeReader {
     ///
     /// Returns `None` if the buffer is currently in use by an active iterator
     /// (i.e., if `read_ranges` was called but the iterator wasn't fully consumed).
-    pub fn into_buffer(self) -> Option<Box<[u8]>> {
+    fn into_buffer(self) -> Option<Box<[u8]>> {
         self.buffer
     }
 
@@ -69,10 +73,7 @@ impl RangeReader {
     ///
     /// When the iterator is dropped or fully consumed, the buffer is returned to
     /// this `RangeReader` for reuse in subsequent calls.
-    pub fn read_ranges<'a>(
-        &'a mut self,
-        file: &'a File,
-    ) -> io::Result<impl Iterator<Item = io::Result<DataRange>> + 'a> {
+    fn read_ranges<'a>(&'a mut self, file: &'a File) -> io::Result<RangeIter<'a>> {
         let file_size = file.metadata()?.len();
         let handle = file.as_raw_handle() as HANDLE;
 
@@ -82,7 +83,7 @@ impl RangeReader {
             .take()
             .unwrap_or_else(|| vec![0u8; self.buffer_size].into_boxed_slice());
 
-        Ok(WindowsRangeIter {
+        Ok(Box::new(WindowsRangeIter {
             handle,
             file_size,
             buffer: Some(buffer),
@@ -94,7 +95,7 @@ impl RangeReader {
             pending_data: None,
             done: false,
             needs_fetch: true,
-        })
+        }))
     }
 }
 
