@@ -10,6 +10,10 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test (${{ matrix.os }})
@@ -22,19 +26,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Configure toolchain
+        run: |
+          rustup toolchain install --profile minimal --no-self-update stable
+          rustup default stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      # https://github.com/actions/cache/issues/752
+      - if: ${{ runner.os == 'Windows' }}
+        name: Use GNU tar
+        shell: cmd
+        run: |
+          echo "Adding GNU tar to PATH"
+          echo C:\Program Files\Git\usr\bin>>"%GITHUB_PATH%"
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --all
@@ -56,21 +61,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: Configure toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --component clippy
+          rustup default stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
+      # https://github.com/actions/cache/issues/752
+      - if: ${{ runner.os == 'Windows' }}
+        name: Use GNU tar
+        shell: cmd
+        run: |
+          echo "Adding GNU tar to PATH"
+          echo C:\Program Files\Git\usr\bin>>"%GITHUB_PATH%"
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Run clippy on extentria
         run: cargo clippy -p extentria -- -D warnings
@@ -82,10 +86,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - name: Configure toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --component rustfmt
+          rustup default stable
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -98,19 +102,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Configure toolchain
+        run: |
+          rustup toolchain install --profile minimal --no-self-update stable
+          rustup default stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: linux-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            linux-cargo-integration-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Run extentria integration tests
         run: cargo test -p extentria --test integration --verbose
@@ -130,13 +127,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Add targets
+      - name: Configure toolchain
         run: |
+          rustup toolchain install --profile minimal --no-self-update stable
+          rustup default stable
           rustup target add x86_64-unknown-linux-musl
           rustup target add aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Check extentria for musl
         run: cargo check -p extentria --target x86_64-unknown-linux-musl
