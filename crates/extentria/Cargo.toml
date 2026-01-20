@@ -14,7 +14,7 @@ zerocopy = { version = "0.8.33", features = ["simd", "std"] }
 zerocopy-derive = "0.8.33"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_System_IO",
     "Win32_System_Ioctl",
