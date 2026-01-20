@@ -13,10 +13,12 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use nix::libc;
 #[cfg(unix)]
 use nix::sys::statfs::statfs;
+#[cfg(unix)]
+use nix::sys::statvfs::statvfs;
 
 /// BTRFS ioctl magic number
 #[cfg(target_os = "linux")]
@@ -50,8 +52,8 @@ pub fn get_hostname() -> Option<String> {
     hostname::get().ok().and_then(|h| h.into_string().ok())
 }
 
-/// Get filesystem information for a path.
-#[cfg(unix)]
+/// Get filesystem information for a path (Linux implementation).
+#[cfg(target_os = "linux")]
 pub fn get_fs_info(path: &Path) -> io::Result<FsInfo> {
     let stat = statfs(path).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
@@ -60,6 +62,20 @@ pub fn get_fs_info(path: &Path) -> io::Result<FsInfo> {
 
     // Try to get the filesystem UUID
     let fs_id = get_fs_uuid(path).ok().flatten();
+
+    Ok(FsInfo { fs_type, fs_id })
+}
+
+/// Get filesystem information for a path (macOS/FreeBSD implementation).
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn get_fs_info(path: &Path) -> io::Result<FsInfo> {
+    let stat = statfs(path).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    // On macOS/FreeBSD, use filesystem_type_name() which returns a string
+    let fs_type = Some(stat.filesystem_type_name().to_string());
+
+    // UUID retrieval is Linux-specific for now
+    let fs_id = None;
 
     Ok(FsInfo { fs_type, fs_id })
 }
@@ -260,7 +276,7 @@ fn get_fs_uuid(_path: &Path) -> io::Result<Option<String>> {
 /// the subvolume read-only property which is used for read-only snapshots.
 #[cfg(target_os = "linux")]
 pub fn is_readonly(path: &Path) -> io::Result<bool> {
-    let stat = statfs(path).map_err(|e| io::Error::other(e))?;
+    let stat = statvfs(path).map_err(|e| io::Error::other(e))?;
 
     // Check if ST_RDONLY mount flag is set
     if stat.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY) {
@@ -268,7 +284,8 @@ pub fn is_readonly(path: &Path) -> io::Result<bool> {
     }
 
     // For btrfs, also check the subvolume read-only flag
-    if stat.filesystem_type().0 as u64 == BTRFS_SUPER_MAGIC {
+    let statfs_result = statfs(path).map_err(|e| io::Error::other(e))?;
+    if statfs_result.filesystem_type().0 as u64 == BTRFS_SUPER_MAGIC {
         if let Ok(readonly) = is_btrfs_subvol_readonly(path) {
             return Ok(readonly);
         }
@@ -280,14 +297,10 @@ pub fn is_readonly(path: &Path) -> io::Result<bool> {
 /// Check if a path is on a read-only filesystem (non-Linux Unix).
 #[cfg(all(unix, not(target_os = "linux")))]
 pub fn is_readonly(path: &Path) -> io::Result<bool> {
-    let stat = statfs(path).map_err(|e| io::Error::other(e))?;
+    let stat = statvfs(path).map_err(|e| io::Error::other(e))?;
 
     // Check if ST_RDONLY mount flag is set
-    if stat.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY) {
-        return Ok(true);
-    }
-
-    Ok(false)
+    Ok(stat.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY))
 }
 
 /// Check if a path is on a read-only filesystem (Windows).
