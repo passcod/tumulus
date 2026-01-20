@@ -243,27 +243,37 @@ async fn upload_catalog<S: Storage>(
                 .await
                 .map_err(CatalogError::Storage)?;
 
-            // Decompress and parse the catalog to extract extent/blob info
-            let (extent_ids, blob_layouts) = parse_catalog_contents(&body)?;
+            // Create a streaming catalog reader to avoid loading everything into memory
+            let catalog_reader = CatalogReader::new(&body)?;
+
+            // Extract extent IDs (we need all of them for the batch existence check)
+            let extent_ids = catalog_reader.extent_ids()?;
+            let blob_count = catalog_reader.blob_count()?;
 
             info!(
                 catalog_id = %catalog_id,
                 extent_count = extent_ids.len(),
-                blob_count = blob_layouts.len(),
+                blob_count = blob_count,
                 "Parsed catalog contents"
             );
 
-            // Write all blob layouts to storage
-            for (blob_id, layout) in &blob_layouts {
-                let encoded = layout.encode();
-                match state.storage.put_blob(blob_id, encoded).await {
-                    Ok(created) => {
-                        if created {
-                            debug!(blob_id = %hex::encode(blob_id), "Stored new blob layout");
+            // Process blob layouts in batches to avoid loading all into memory
+            const BLOB_BATCH_SIZE: usize = 1000;
+
+            let mut batch_iter = catalog_reader.blob_batches(BLOB_BATCH_SIZE);
+            while let Some(batch_result) = batch_iter.next_batch()? {
+                // Process each batch asynchronously
+                for (blob_id, layout) in batch_result {
+                    let encoded = layout.encode();
+                    match state.storage.put_blob(&blob_id, encoded).await {
+                        Ok(created) => {
+                            if created {
+                                debug!(blob_id = %hex::encode(blob_id), "Stored new blob layout");
+                            }
                         }
-                    }
-                    Err(e) => {
-                        warn!(blob_id = %hex::encode(blob_id), error = %e, "Failed to store blob layout");
+                        Err(e) => {
+                            warn!(blob_id = %hex::encode(blob_id), error = %e, "Failed to store blob layout");
+                        }
                     }
                 }
             }
@@ -408,35 +418,50 @@ async fn get_missing_extents_from_ids<S: Storage>(
 
 /// Parse a catalog file (possibly zstd-compressed) and extract extent/blob info.
 #[allow(clippy::type_complexity)]
-fn parse_catalog_contents(
-    data: &[u8],
-) -> Result<(Vec<B3Id>, Vec<(B3Id, BlobLayout)>), CatalogError> {
-    // Check if the data is zstd-compressed
-    let is_compressed = data.len() >= 4 && data[0..4] == [0x28, 0xB5, 0x2F, 0xFD];
+/// A streaming reader for catalog contents that avoids loading all data into memory.
+///
+/// This struct decompresses the catalog to a temp file and provides methods to
+/// extract extent IDs and iterate over blob layouts without holding everything in memory.
+struct CatalogReader {
+    temp_file: NamedTempFile,
+}
 
-    // Decompress if needed
-    let temp_file = if is_compressed {
-        let mut temp = NamedTempFile::new().map_err(CatalogError::Io)?;
-        let reader = BufReader::new(data.reader());
-        let mut decoder = zstd::stream::Decoder::new(reader).map_err(CatalogError::Io)?;
-        std::io::copy(&mut decoder, &mut temp).map_err(CatalogError::Io)?;
-        temp.flush().map_err(CatalogError::Io)?;
-        temp
-    } else {
-        let mut temp = NamedTempFile::new().map_err(CatalogError::Io)?;
-        temp.write_all(data).map_err(CatalogError::Io)?;
-        temp.flush().map_err(CatalogError::Io)?;
-        temp
-    };
+impl CatalogReader {
+    /// Create a new CatalogReader by decompressing the catalog data to a temp file.
+    fn new(data: &[u8]) -> Result<Self, CatalogError> {
+        // Check if the data is zstd-compressed
+        let is_compressed = data.len() >= 4 && data[0..4] == [0x28, 0xB5, 0x2F, 0xFD];
 
-    // Open as SQLite database
-    let conn = Connection::open(temp_file.path()).map_err(|e| {
-        CatalogError::InvalidCatalog(format!("Failed to open catalog database: {}", e))
-    })?;
+        // Decompress if needed
+        let temp_file = if is_compressed {
+            let mut temp = NamedTempFile::new().map_err(CatalogError::Io)?;
+            let reader = BufReader::new(data.reader());
+            let mut decoder = zstd::stream::Decoder::new(reader).map_err(CatalogError::Io)?;
+            std::io::copy(&mut decoder, &mut temp).map_err(CatalogError::Io)?;
+            temp.flush().map_err(CatalogError::Io)?;
+            temp
+        } else {
+            let mut temp = NamedTempFile::new().map_err(CatalogError::Io)?;
+            temp.write_all(data).map_err(CatalogError::Io)?;
+            temp.flush().map_err(CatalogError::Io)?;
+            temp
+        };
 
-    // Extract all unique extent IDs (non-null extent_id from blob_extents)
-    let mut extent_ids: Vec<B3Id> = Vec::new();
-    {
+        Ok(Self { temp_file })
+    }
+
+    /// Open a SQLite connection to the catalog.
+    fn open_connection(&self) -> Result<Connection, CatalogError> {
+        Connection::open(self.temp_file.path()).map_err(|e| {
+            CatalogError::InvalidCatalog(format!("Failed to open catalog database: {}", e))
+        })
+    }
+
+    /// Extract all unique extent IDs from the catalog.
+    fn extent_ids(&self) -> Result<Vec<B3Id>, CatalogError> {
+        let conn = self.open_connection()?;
+
+        let mut extent_ids: Vec<B3Id> = Vec::new();
         let mut stmt = conn
             .prepare("SELECT DISTINCT extent_id FROM blob_extents WHERE extent_id IS NOT NULL")
             .map_err(|e| CatalogError::InvalidCatalog(format!("Failed to query extents: {}", e)))?;
@@ -457,25 +482,75 @@ fn parse_catalog_contents(
                 .map_err(|_| CatalogError::InvalidCatalog("Invalid extent ID size".to_string()))?;
             extent_ids.push(extent_id);
         }
+
+        Ok(extent_ids)
     }
 
-    // Extract all blobs with their extent mappings
-    let mut blob_layouts: Vec<(B3Id, BlobLayout)> = Vec::new();
-    {
-        let mut blob_stmt = conn
-            .prepare("SELECT blob_id, bytes FROM blobs")
+    /// Count the total number of blobs in the catalog.
+    fn blob_count(&self) -> Result<u64, CatalogError> {
+        let conn = self.open_connection()?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get(0))
+            .map_err(|e| CatalogError::InvalidCatalog(format!("Failed to count blobs: {}", e)))?;
+        Ok(count as u64)
+    }
+
+    /// Create a batch iterator for processing blob layouts without loading all into memory.
+    fn blob_batches(&self, batch_size: usize) -> BlobBatchIterator<'_> {
+        BlobBatchIterator {
+            reader: self,
+            batch_size,
+            offset: 0,
+            total: None,
+        }
+    }
+}
+
+/// Iterator that yields batches of blob layouts from a catalog.
+struct BlobBatchIterator<'a> {
+    reader: &'a CatalogReader,
+    batch_size: usize,
+    offset: usize,
+    total: Option<usize>,
+}
+
+impl BlobBatchIterator<'_> {
+    /// Get the next batch of blob layouts, or None if exhausted.
+    fn next_batch(&mut self) -> Result<Option<Vec<(B3Id, BlobLayout)>>, CatalogError> {
+        let conn = self.reader.open_connection()?;
+
+        // Get total count on first call
+        if self.total.is_none() {
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get(0))
+                .map_err(|e| {
+                    CatalogError::InvalidCatalog(format!("Failed to count blobs: {}", e))
+                })?;
+            self.total = Some(count as usize);
+        }
+
+        let total = self.total.unwrap();
+        if self.offset >= total {
+            return Ok(None);
+        }
+
+        // Query this batch of blobs using LIMIT/OFFSET
+        let mut stmt = conn
+            .prepare("SELECT blob_id, bytes FROM blobs LIMIT ?1 OFFSET ?2")
             .map_err(|e| CatalogError::InvalidCatalog(format!("Failed to query blobs: {}", e)))?;
 
-        let blob_rows = blob_stmt
-            .query_map([], |row| {
+        let rows = stmt
+            .query_map([self.batch_size as i64, self.offset as i64], |row| {
                 let blob_id: Vec<u8> = row.get(0)?;
                 let bytes: i64 = row.get(1)?;
                 Ok((blob_id, bytes as u64))
             })
             .map_err(|e| CatalogError::InvalidCatalog(format!("Failed to query blobs: {}", e)))?;
 
-        for blob_row in blob_rows {
-            let (blob_id_vec, total_bytes) = blob_row
+        let mut batch = Vec::with_capacity(self.batch_size);
+
+        for row in rows {
+            let (blob_id_vec, total_bytes) = row
                 .map_err(|e| CatalogError::InvalidCatalog(format!("Failed to read blob: {}", e)))?;
 
             let blob_id: B3Id = blob_id_vec
@@ -517,7 +592,7 @@ fn parse_catalog_contents(
                 });
             }
 
-            blob_layouts.push((
+            batch.push((
                 blob_id,
                 BlobLayout {
                     total_bytes,
@@ -525,9 +600,10 @@ fn parse_catalog_contents(
                 },
             ));
         }
-    }
 
-    Ok((extent_ids, blob_layouts))
+        self.offset += batch.len();
+        Ok(Some(batch))
+    }
 }
 
 fn parse_uuid(s: &str) -> Result<Uuid, CatalogError> {
