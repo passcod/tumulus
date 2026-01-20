@@ -85,15 +85,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Process files in parallel, with per-thread RangeReader for buffer reuse
     let results: Vec<_> = paths
         .par_iter()
-        .map_init(
-            || RangeReader::new(),
-            |reader, path| {
-                (
-                    path.clone(),
-                    process_file_with_reader(path, &source_path, reader),
-                )
-            },
-        )
+        .map_init(RangeReader::new, |reader, path| {
+            (
+                path.clone(),
+                process_file_with_reader(path, &source_path, reader),
+            )
+        })
         .collect();
 
     // Collect successful results and handle errors
@@ -185,13 +182,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Optional: fs_writeable (true if not readonly)
-    if let Ok(readonly) = is_readonly(&source_path) {
-        if !readonly {
-            conn.execute(
-                "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-                params!["fs_writeable", json!(true).to_string()],
-            )?;
-        }
+    if let Ok(readonly) = is_readonly(&source_path)
+        && !readonly
+    {
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+            params!["fs_writeable", json!(true).to_string()],
+        )?;
     }
 
     // User-provided extra metadata

@@ -10,8 +10,8 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_util::io::StreamReader;
 
-use crate::api::AppState;
 use crate::storage::{Storage, StorageError};
+use crate::{B3Id, api::AppState};
 
 pub fn router<S: Storage>() -> Router<AppState<S>> {
     Router::new()
@@ -108,13 +108,13 @@ async fn check_extents<S: Storage>(
     State(state): State<AppState<S>>,
     Json(req): Json<CheckRequest>,
 ) -> Result<impl IntoResponse, StorageError> {
-    let ids: Result<Vec<[u8; 32]>, _> = req.ids.iter().map(|s| parse_id(s)).collect();
+    let ids: Result<Vec<B3Id>, _> = req.ids.iter().map(|s| parse_id(s)).collect();
     let ids = ids?;
     let exists = state.storage.extents_exist(&ids).await?;
     Ok(Json(CheckResponse { exists }))
 }
 
-fn parse_id(s: &str) -> Result<[u8; 32], StorageError> {
+fn parse_id(s: &str) -> Result<B3Id, StorageError> {
     let bytes = hex::decode(s).map_err(|_| StorageError::InvalidData("invalid hex".into()))?;
     bytes
         .try_into()

@@ -23,6 +23,7 @@ use tempfile::NamedTempFile;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::B3Id;
 use crate::api::AppState;
 use crate::blob::BlobLayout;
 use crate::db::CatalogStatus;
@@ -86,7 +87,7 @@ async fn list_catalogs<S: Storage>(
 /// Result of checking catalog state in the database
 enum CatalogCheckResult {
     /// Catalog exists with matching checksum, return extent IDs to check
-    ResumeUpload { extent_ids: Vec<[u8; 32]> },
+    ResumeUpload { extent_ids: Vec<B3Id> },
     /// Catalog exists with different checksum, use new ID
     NewId { new_id: Uuid },
     /// Catalog doesn't exist, created new entry
@@ -178,9 +179,9 @@ async fn initiate_upload<S: Storage>(
 /// Result of checking catalog for upload
 enum UploadCheckResult {
     /// Catalog already uploaded, return existing extent IDs
-    AlreadyUploaded { extent_ids: Vec<[u8; 32]> },
+    AlreadyUploaded { extent_ids: Vec<B3Id> },
     /// Catalog pending, proceed with upload
-    Pending { expected_checksum: [u8; 32] },
+    Pending { expected_checksum: B3Id },
     /// Catalog not found
     NotFound,
 }
@@ -228,7 +229,7 @@ async fn upload_catalog<S: Storage>(
         UploadCheckResult::Pending { expected_checksum } => {
             // Verify the checksum
             let actual_checksum = blake3::hash(&body);
-            if actual_checksum.as_bytes() != &expected_checksum {
+            if actual_checksum != expected_checksum.0 {
                 return Err(CatalogError::ChecksumMismatch {
                     expected: hex::encode(expected_checksum),
                     actual: actual_checksum.to_hex().to_string(),
@@ -275,7 +276,7 @@ async fn upload_catalog<S: Storage>(
                 .map_err(CatalogError::Storage)?;
 
             // Filter to only missing extents
-            let missing_extents: Vec<[u8; 32]> = extent_ids
+            let missing_extents: Vec<B3Id> = extent_ids
                 .into_iter()
                 .zip(exists.iter())
                 .filter_map(|(id, &exists)| if exists { None } else { Some(id) })
@@ -308,7 +309,7 @@ enum FinalizeCheckResult {
     /// Already complete
     Complete,
     /// Need to check these extent IDs
-    CheckExtents { extent_ids: Vec<[u8; 32]> },
+    CheckExtents { extent_ids: Vec<B3Id> },
     /// Not found
     NotFound,
 }
@@ -385,8 +386,8 @@ async fn finalize_upload<S: Storage>(
 /// Get the list of extents that are still missing given a list of extent IDs.
 async fn get_missing_extents_from_ids<S: Storage>(
     storage: &Arc<S>,
-    extent_ids: Vec<[u8; 32]>,
-) -> Result<Vec<[u8; 32]>, CatalogError> {
+    extent_ids: Vec<B3Id>,
+) -> Result<Vec<B3Id>, CatalogError> {
     if extent_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -396,7 +397,7 @@ async fn get_missing_extents_from_ids<S: Storage>(
         .await
         .map_err(CatalogError::Storage)?;
 
-    let missing: Vec<[u8; 32]> = extent_ids
+    let missing: Vec<B3Id> = extent_ids
         .into_iter()
         .zip(exists.iter())
         .filter_map(|(id, &exists)| if exists { None } else { Some(id) })
@@ -406,9 +407,10 @@ async fn get_missing_extents_from_ids<S: Storage>(
 }
 
 /// Parse a catalog file (possibly zstd-compressed) and extract extent/blob info.
+#[allow(clippy::type_complexity)]
 fn parse_catalog_contents(
     data: &[u8],
-) -> Result<(Vec<[u8; 32]>, Vec<([u8; 32], BlobLayout)>), CatalogError> {
+) -> Result<(Vec<B3Id>, Vec<(B3Id, BlobLayout)>), CatalogError> {
     // Check if the data is zstd-compressed
     let is_compressed = data.len() >= 4 && data[0..4] == [0x28, 0xB5, 0x2F, 0xFD];
 
@@ -433,7 +435,7 @@ fn parse_catalog_contents(
     })?;
 
     // Extract all unique extent IDs (non-null extent_id from blob_extents)
-    let mut extent_ids: Vec<[u8; 32]> = Vec::new();
+    let mut extent_ids: Vec<B3Id> = Vec::new();
     {
         let mut stmt = conn
             .prepare("SELECT DISTINCT extent_id FROM blob_extents WHERE extent_id IS NOT NULL")
@@ -450,7 +452,7 @@ fn parse_catalog_contents(
             let extent_id: Vec<u8> = row.map_err(|e| {
                 CatalogError::InvalidCatalog(format!("Failed to read extent: {}", e))
             })?;
-            let extent_id: [u8; 32] = extent_id
+            let extent_id: B3Id = extent_id
                 .try_into()
                 .map_err(|_| CatalogError::InvalidCatalog("Invalid extent ID size".to_string()))?;
             extent_ids.push(extent_id);
@@ -458,7 +460,7 @@ fn parse_catalog_contents(
     }
 
     // Extract all blobs with their extent mappings
-    let mut blob_layouts: Vec<([u8; 32], BlobLayout)> = Vec::new();
+    let mut blob_layouts: Vec<(B3Id, BlobLayout)> = Vec::new();
     {
         let mut blob_stmt = conn
             .prepare("SELECT blob_id, bytes FROM blobs")
@@ -476,7 +478,7 @@ fn parse_catalog_contents(
             let (blob_id_vec, total_bytes) = blob_row
                 .map_err(|e| CatalogError::InvalidCatalog(format!("Failed to read blob: {}", e)))?;
 
-            let blob_id: [u8; 32] = blob_id_vec
+            let blob_id: B3Id = blob_id_vec
                 .try_into()
                 .map_err(|_| CatalogError::InvalidCatalog("Invalid blob ID size".to_string()))?;
 
@@ -502,7 +504,7 @@ fn parse_catalog_contents(
                     CatalogError::InvalidCatalog(format!("Failed to read blob extent: {}", e))
                 })?;
 
-                let extent_id: [u8; 32] = extent_id_vec.try_into().map_err(|_| {
+                let extent_id: B3Id = extent_id_vec.try_into().map_err(|_| {
                     CatalogError::InvalidCatalog(
                         "Invalid extent ID size in blob_extents".to_string(),
                     )
@@ -532,7 +534,7 @@ fn parse_uuid(s: &str) -> Result<Uuid, CatalogError> {
     Uuid::parse_str(s).map_err(|_| CatalogError::InvalidUuid(s.to_string()))
 }
 
-fn parse_checksum(s: &str) -> Result<[u8; 32], CatalogError> {
+fn parse_checksum(s: &str) -> Result<B3Id, CatalogError> {
     let bytes = hex::decode(s).map_err(|_| CatalogError::InvalidChecksum(s.to_string()))?;
     bytes
         .try_into()

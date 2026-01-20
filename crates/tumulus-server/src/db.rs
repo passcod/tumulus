@@ -9,6 +9,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::B3Id;
+
 /// Database error type.
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -53,7 +55,7 @@ impl CatalogStatus {
 #[derive(Debug, Clone)]
 pub struct CatalogInfo {
     pub id: Uuid,
-    pub checksum: [u8; 32],
+    pub checksum: B3Id,
     pub status: CatalogStatus,
     pub created_at: i64,
 }
@@ -132,7 +134,7 @@ impl UploadDb {
                 let id = Uuid::from_slice(&id_bytes).map_err(|_| {
                     rusqlite::Error::InvalidColumnType(0, "id".into(), rusqlite::types::Type::Blob)
                 })?;
-                let checksum: [u8; 32] = checksum_bytes.try_into().map_err(|_| {
+                let checksum: B3Id = checksum_bytes.try_into().map_err(|_| {
                     rusqlite::Error::InvalidColumnType(
                         1,
                         "checksum".into(),
@@ -161,7 +163,7 @@ impl UploadDb {
     /// Look up a catalog by checksum.
     pub fn find_catalog_by_checksum(
         &self,
-        checksum: &[u8; 32],
+        checksum: &B3Id,
     ) -> Result<Option<CatalogInfo>, DbError> {
         let result = self
             .conn
@@ -184,7 +186,7 @@ impl UploadDb {
                 let id = Uuid::from_slice(&id_bytes).map_err(|_| {
                     rusqlite::Error::InvalidColumnType(0, "id".into(), rusqlite::types::Type::Blob)
                 })?;
-                let checksum: [u8; 32] = checksum_bytes.try_into().map_err(|_| {
+                let checksum: B3Id = checksum_bytes.try_into().map_err(|_| {
                     rusqlite::Error::InvalidColumnType(
                         1,
                         "checksum".into(),
@@ -211,7 +213,7 @@ impl UploadDb {
     }
 
     /// Create a new catalog entry.
-    pub fn create_catalog(&self, id: Uuid, checksum: &[u8; 32]) -> Result<(), DbError> {
+    pub fn create_catalog(&self, id: Uuid, checksum: &B3Id) -> Result<(), DbError> {
         self.conn.execute(
             "INSERT INTO catalogs (id, checksum, status) VALUES (?1, ?2, ?3)",
             params![
@@ -244,7 +246,7 @@ impl UploadDb {
     pub fn set_catalog_extents(
         &self,
         catalog_id: Uuid,
-        extent_ids: &[[u8; 32]],
+        extent_ids: &[B3Id],
     ) -> Result<(), DbError> {
         // First, clear any existing extents for this catalog
         self.conn.execute(
@@ -268,7 +270,7 @@ impl UploadDb {
     }
 
     /// Get the list of extent IDs needed for a catalog.
-    pub fn get_catalog_extents(&self, catalog_id: Uuid) -> Result<Vec<[u8; 32]>, DbError> {
+    pub fn get_catalog_extents(&self, catalog_id: Uuid) -> Result<Vec<B3Id>, DbError> {
         let mut stmt = self
             .conn
             .prepare("SELECT extent_id FROM catalog_extents WHERE catalog_id = ?1")?;
@@ -281,7 +283,7 @@ impl UploadDb {
         let mut extents = Vec::new();
         for row in rows {
             let extent_id: Vec<u8> = row?;
-            let extent_id: [u8; 32] = extent_id.try_into().map_err(|_| {
+            let extent_id: B3Id = extent_id.try_into().map_err(|_| {
                 rusqlite::Error::InvalidColumnType(
                     0,
                     "extent_id".into(),
@@ -312,7 +314,7 @@ mod tests {
     fn test_create_and_get_catalog() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
-        let checksum = [0x42u8; 32];
+        let checksum = [0x42u8; 32].into();
 
         db.create_catalog(id, &checksum).unwrap();
 
@@ -326,7 +328,7 @@ mod tests {
     fn test_find_by_checksum() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
-        let checksum = [0x42u8; 32];
+        let checksum = [0x42u8; 32].into();
 
         db.create_catalog(id, &checksum).unwrap();
 
@@ -338,7 +340,7 @@ mod tests {
     fn test_update_status() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
-        let checksum = [0x42u8; 32];
+        let checksum = [0x42u8; 32].into();
 
         db.create_catalog(id, &checksum).unwrap();
         db.update_status(id, CatalogStatus::Uploading).unwrap();
@@ -351,25 +353,29 @@ mod tests {
     fn test_catalog_extents() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
-        let checksum = [0x42u8; 32];
+        let checksum = [0x42u8; 32].into();
 
         db.create_catalog(id, &checksum).unwrap();
 
-        let extents = vec![[0x01u8; 32], [0x02u8; 32], [0x03u8; 32]];
+        let extents = vec![
+            [0x01u8; 32].into(),
+            [0x02u8; 32].into(),
+            [0x03u8; 32].into(),
+        ];
         db.set_catalog_extents(id, &extents).unwrap();
 
         let retrieved = db.get_catalog_extents(id).unwrap();
         assert_eq!(retrieved.len(), 3);
-        assert!(retrieved.contains(&[0x01u8; 32]));
-        assert!(retrieved.contains(&[0x02u8; 32]));
-        assert!(retrieved.contains(&[0x03u8; 32]));
+        assert!(retrieved.contains(&[0x01u8; 32].into()));
+        assert!(retrieved.contains(&[0x02u8; 32].into()));
+        assert!(retrieved.contains(&[0x03u8; 32].into()));
     }
 
     #[test]
     fn test_delete_catalog() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
-        let checksum = [0x42u8; 32];
+        let checksum = [0x42u8; 32].into();
 
         db.create_catalog(id, &checksum).unwrap();
         db.delete_catalog(id).unwrap();

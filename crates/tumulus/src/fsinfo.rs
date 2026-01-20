@@ -55,7 +55,7 @@ pub fn get_hostname() -> Option<String> {
 /// Get filesystem information for a path (Linux implementation).
 #[cfg(target_os = "linux")]
 pub fn get_fs_info(path: &Path) -> io::Result<FsInfo> {
-    let stat = statfs(path).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let stat = statfs(path).map_err(io::Error::other)?;
 
     // Get filesystem type from the magic number
     let fs_type = get_fs_type_name(stat.filesystem_type().0 as u64);
@@ -237,22 +237,21 @@ fn get_fs_uuid(path: &Path) -> io::Result<Option<String>> {
     if let Ok(entries) = fs::read_dir("/dev/disk/by-uuid") {
         for entry in entries.flatten() {
             if let Ok(target) = fs::read_link(entry.path()) {
-                if let Ok(target_metadata) = fs::metadata(&target) {
-                    if target_metadata.dev() == dev || target_metadata.rdev() == dev {
-                        if let Some(uuid) = entry.file_name().to_str() {
-                            return Ok(Some(uuid.to_string()));
-                        }
-                    }
+                if let Ok(target_metadata) = fs::metadata(&target)
+                    && (target_metadata.dev() == dev || target_metadata.rdev() == dev)
+                    && let Some(uuid) = entry.file_name().to_str()
+                {
+                    return Ok(Some(uuid.to_string()));
                 }
                 // Also check if the symlink resolves to our device
-                if let Ok(canonical) = fs::canonicalize(entry.path()) {
-                    if let Ok(canonical_meta) = fs::metadata(&canonical) {
-                        // Check rdev for block devices
-                        if canonical_meta.rdev() == dev {
-                            if let Some(uuid) = entry.file_name().to_str() {
-                                return Ok(Some(uuid.to_string()));
-                            }
-                        }
+                if let Ok(canonical) = fs::canonicalize(entry.path())
+                    && let Ok(canonical_meta) = fs::metadata(&canonical)
+                {
+                    // Check rdev for block devices
+                    if canonical_meta.rdev() == dev
+                        && let Some(uuid) = entry.file_name().to_str()
+                    {
+                        return Ok(Some(uuid.to_string()));
                     }
                 }
             }
@@ -276,7 +275,7 @@ fn get_fs_uuid(_path: &Path) -> io::Result<Option<String>> {
 /// the subvolume read-only property which is used for read-only snapshots.
 #[cfg(target_os = "linux")]
 pub fn is_readonly(path: &Path) -> io::Result<bool> {
-    let stat = statvfs(path).map_err(|e| io::Error::other(e))?;
+    let stat = statvfs(path).map_err(io::Error::other)?;
 
     // Check if ST_RDONLY mount flag is set
     if stat.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY) {
@@ -284,11 +283,11 @@ pub fn is_readonly(path: &Path) -> io::Result<bool> {
     }
 
     // For btrfs, also check the subvolume read-only flag
-    let statfs_result = statfs(path).map_err(|e| io::Error::other(e))?;
-    if statfs_result.filesystem_type().0 as u64 == BTRFS_SUPER_MAGIC {
-        if let Ok(readonly) = is_btrfs_subvol_readonly(path) {
-            return Ok(readonly);
-        }
+    let statfs_result = statfs(path).map_err(io::Error::other)?;
+    if statfs_result.filesystem_type().0 as u64 == BTRFS_SUPER_MAGIC
+        && let Ok(readonly) = is_btrfs_subvol_readonly(path)
+    {
+        return Ok(readonly);
     }
 
     Ok(false)

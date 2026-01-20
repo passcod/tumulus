@@ -28,6 +28,7 @@ pub struct FileInfo {
 
 /// Extract Unix-specific metadata from file metadata.
 #[cfg(unix)]
+#[allow(clippy::type_complexity)]
 fn extract_platform_metadata(
     metadata: &fs::Metadata,
 ) -> (
@@ -63,6 +64,7 @@ fn extract_platform_metadata(
 
 /// Extract Windows-specific metadata from file metadata.
 #[cfg(windows)]
+#[allow(clippy::type_complexity)]
 fn extract_platform_metadata(
     metadata: &fs::Metadata,
 ) -> (

@@ -8,6 +8,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
+use crate::B3Id;
+
 use super::{ByteReader, ByteStream, ObjectMeta, Storage, StorageError};
 
 pub struct FsStorage {
@@ -31,7 +33,7 @@ impl FsStorage {
 
     /// Convert a 32-byte ID to a sharded path.
     /// Example: ab/cd/ef0123456789... (first 2 bytes as subdirs)
-    fn sharded_path(&self, prefix: &str, id: &[u8; 32]) -> PathBuf {
+    fn sharded_path(&self, prefix: &str, id: &B3Id) -> PathBuf {
         let hex = hex::encode(id);
         self.base_path
             .join(prefix)
@@ -64,7 +66,7 @@ impl FsStorage {
 impl Storage for FsStorage {
     async fn put_extent(
         &self,
-        id: &[u8; 32],
+        id: &B3Id,
         mut data: ByteReader,
         size_hint: Option<u64>,
     ) -> Result<bool, StorageError> {
@@ -107,7 +109,7 @@ impl Storage for FsStorage {
 
         // Verify hash
         let actual = hasher.finalize();
-        if actual.as_bytes() != id {
+        if actual != id.0 {
             // Clean up temp file
             let _ = fs::remove_file(&temp_path).await;
             return Err(StorageError::HashMismatch {
@@ -121,7 +123,7 @@ impl Storage for FsStorage {
         Ok(true)
     }
 
-    async fn get_extent(&self, id: &[u8; 32]) -> Result<ByteStream, StorageError> {
+    async fn get_extent(&self, id: &B3Id) -> Result<ByteStream, StorageError> {
         let path = self.sharded_path("extents", id);
 
         let file = File::open(&path).await.map_err(|e| {
@@ -142,12 +144,12 @@ impl Storage for FsStorage {
         Ok(Box::new(mapped))
     }
 
-    async fn extent_exists(&self, id: &[u8; 32]) -> Result<bool, StorageError> {
+    async fn extent_exists(&self, id: &B3Id) -> Result<bool, StorageError> {
         let path = self.sharded_path("extents", id);
         Ok(fs::try_exists(&path).await.unwrap_or(false))
     }
 
-    async fn extents_exist(&self, ids: &[[u8; 32]]) -> Result<Vec<bool>, StorageError> {
+    async fn extents_exist(&self, ids: &[B3Id]) -> Result<Vec<bool>, StorageError> {
         let mut results = Vec::with_capacity(ids.len());
         for id in ids {
             results.push(self.extent_exists(id).await?);
@@ -155,7 +157,7 @@ impl Storage for FsStorage {
         Ok(results)
     }
 
-    async fn extent_meta(&self, id: &[u8; 32]) -> Result<ObjectMeta, StorageError> {
+    async fn extent_meta(&self, id: &B3Id) -> Result<ObjectMeta, StorageError> {
         let path = self.sharded_path("extents", id);
         let metadata = fs::metadata(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -171,7 +173,7 @@ impl Storage for FsStorage {
         })
     }
 
-    async fn put_blob(&self, id: &[u8; 32], data: Bytes) -> Result<bool, StorageError> {
+    async fn put_blob(&self, id: &B3Id, data: Bytes) -> Result<bool, StorageError> {
         let path = self.sharded_path("blobs", id);
 
         // Check if already exists
@@ -183,7 +185,7 @@ impl Storage for FsStorage {
         Ok(true)
     }
 
-    async fn get_blob(&self, id: &[u8; 32]) -> Result<Bytes, StorageError> {
+    async fn get_blob(&self, id: &B3Id) -> Result<Bytes, StorageError> {
         let path = self.sharded_path("blobs", id);
         let data = fs::read(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -195,12 +197,12 @@ impl Storage for FsStorage {
         Ok(Bytes::from(data))
     }
 
-    async fn blob_exists(&self, id: &[u8; 32]) -> Result<bool, StorageError> {
+    async fn blob_exists(&self, id: &B3Id) -> Result<bool, StorageError> {
         let path = self.sharded_path("blobs", id);
         Ok(fs::try_exists(&path).await.unwrap_or(false))
     }
 
-    async fn blob_meta(&self, id: &[u8; 32]) -> Result<ObjectMeta, StorageError> {
+    async fn blob_meta(&self, id: &B3Id) -> Result<ObjectMeta, StorageError> {
         let path = self.sharded_path("blobs", id);
         let metadata = fs::metadata(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {

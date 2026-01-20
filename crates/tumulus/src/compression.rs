@@ -107,21 +107,13 @@ pub fn open_catalog(path: &Path) -> io::Result<(Connection, Option<NamedTempFile
     if is_zstd_compressed(path)? {
         debug!(?path, "Opening compressed catalog");
         let temp_file = decompress_to_tempfile(path)?;
-        let conn = Connection::open(temp_file.path()).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to open decompressed catalog: {}", e),
-            )
-        })?;
+        let conn = Connection::open(temp_file.path())
+            .map_err(|e| io::Error::other(format!("Failed to open decompressed catalog: {}", e)))?;
         Ok((conn, Some(temp_file)))
     } else {
         debug!(?path, "Opening uncompressed catalog");
-        let conn = Connection::open(path).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to open catalog: {}", e),
-            )
-        })?;
+        let conn = Connection::open(path)
+            .map_err(|e| io::Error::other(format!("Failed to open catalog: {}", e)))?;
         Ok((conn, None))
     }
 }
