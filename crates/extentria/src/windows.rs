@@ -129,7 +129,8 @@ impl WindowsRangeIter<'_> {
     /// Returns `Ok(true)` if we got results, `Ok(false)` if there are no more,
     /// or `Err` on failure.
     fn fetch_page(&mut self) -> io::Result<bool> {
-        if self.query_offset >= self.file_size {
+        // Empty files or already past end - no more data
+        if self.file_size == 0 || self.query_offset >= self.file_size {
             return Ok(false);
         }
 
@@ -194,7 +195,16 @@ impl WindowsRangeIter<'_> {
         let ptr = buffer.as_ptr().wrapping_add(offset) as *const FILE_ALLOCATED_RANGE_BUFFER;
         let entry = unsafe { &*ptr };
 
-        Some((entry.FileOffset as u64, entry.Length as u64))
+        let range_offset = entry.FileOffset as u64;
+        let mut range_length = entry.Length as u64;
+
+        // Clamp length to not exceed file size (Windows returns allocated ranges
+        // which may extend beyond the logical file size due to cluster alignment)
+        if range_offset + range_length > self.file_size {
+            range_length = self.file_size.saturating_sub(range_offset);
+        }
+
+        Some((range_offset, range_length))
     }
 
     /// Handle the end of iteration, returning trailing sparse hole if needed.

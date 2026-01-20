@@ -160,9 +160,16 @@ impl Iterator for FiemapRangeIter<'_> {
                     );
 
                     // Store the data range to return next iteration
+                    // Clamp length to not exceed file size (extents can extend beyond
+                    // logical file size due to preallocation or block alignment)
+                    let clamped_length = if extent.logical_offset + extent.length > self.file_size {
+                        self.file_size.saturating_sub(extent.logical_offset)
+                    } else {
+                        extent.length
+                    };
                     let range = DataRange {
                         offset: extent.logical_offset,
-                        length: extent.length,
+                        length: clamped_length,
                         flags: RangeFlags {
                             sparse: false,
                             shared: extent.shared(),
@@ -179,9 +186,16 @@ impl Iterator for FiemapRangeIter<'_> {
                 }
 
                 // Return this extent as a data range
+                // Clamp length to not exceed file size (extents can extend beyond
+                // logical file size due to preallocation or block alignment)
+                let clamped_length = if extent.logical_offset + extent.length > self.file_size {
+                    self.file_size.saturating_sub(extent.logical_offset)
+                } else {
+                    extent.length
+                };
                 let range = DataRange {
                     offset: extent.logical_offset,
-                    length: extent.length,
+                    length: clamped_length,
                     flags: RangeFlags {
                         sparse: false,
                         shared: extent.shared(),

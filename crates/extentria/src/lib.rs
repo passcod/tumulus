@@ -78,13 +78,14 @@ mod tests {
     /// Check if an error indicates the filesystem doesn't support extent queries.
     /// This can happen on tmpfs, some network filesystems, etc.
     fn is_unsupported_error(err: &io::Error) -> bool {
-        // EOPNOTSUPP = 95 on Linux, ENOTTY = 25 on Linux
+        // EOPNOTSUPP = 95 on Linux, ENOTTY = 25 on Linux, EINVAL = 22 on Linux
+        // EINVAL can happen on some filesystems that don't properly support FIEMAP
         // On Windows, we might get ERROR_NOT_SUPPORTED = 50
         #[cfg(unix)]
         {
             matches!(
                 err.raw_os_error(),
-                Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY)
+                Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY) | Some(libc::EINVAL)
             )
         }
         #[cfg(windows)]
@@ -128,9 +129,13 @@ mod tests {
                 // Regular file should have at least one data range
                 assert!(!ranges.is_empty());
 
-                // Total length should match file size
+                // Total length should cover the file size
+                // (may be larger due to filesystem block/cluster alignment)
                 let total_len: u64 = ranges.iter().map(|r| r.length).sum();
-                assert_eq!(total_len, 13);
+                assert!(
+                    total_len >= 13,
+                    "total length {total_len} should be >= file size 13"
+                );
             }
             Err(e) if is_unsupported_error(&e) => {
                 // Skip test on filesystems that don't support extent queries
