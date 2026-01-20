@@ -1,10 +1,9 @@
 //! File metadata and processing functionality.
 
-use std::{
-    fs, io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
-    path::Path,
-};
+use std::{fs, io, path::Path};
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use extentria::RangeReader;
 use serde_json::json;
@@ -27,6 +26,100 @@ pub struct FileInfo {
     pub special: Option<serde_json::Value>,
 }
 
+/// Extract Unix-specific metadata from file metadata.
+#[cfg(unix)]
+fn extract_platform_metadata(
+    metadata: &fs::Metadata,
+) -> (
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+    Option<u64>,
+) {
+    let ts_created = None; // Linux doesn't have creation time in standard stat
+    let ts_modified = metadata.mtime().checked_mul(1000);
+    let ts_accessed = metadata.atime().checked_mul(1000);
+    let ts_changed = metadata.ctime().checked_mul(1000);
+    let unix_mode = Some(metadata.permissions().mode());
+    let unix_owner_id = Some(metadata.uid());
+    let unix_group_id = Some(metadata.gid());
+    let fs_inode = Some(metadata.ino());
+
+    (
+        ts_created,
+        ts_modified,
+        ts_accessed,
+        ts_changed,
+        unix_mode,
+        unix_owner_id,
+        unix_group_id,
+        fs_inode,
+    )
+}
+
+/// Extract Windows-specific metadata from file metadata.
+#[cfg(windows)]
+fn extract_platform_metadata(
+    metadata: &fs::Metadata,
+) -> (
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+    Option<u64>,
+) {
+    use std::time::UNIX_EPOCH;
+
+    // Windows has creation time
+    let ts_created = metadata
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+
+    let ts_modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+
+    let ts_accessed = metadata
+        .accessed()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+
+    // Windows doesn't have ctime (inode change time)
+    let ts_changed = None;
+
+    // Unix-specific fields are not available on Windows
+    let unix_mode = None;
+    let unix_owner_id = None;
+    let unix_group_id = None;
+
+    // Windows doesn't have inodes; we could use volume serial + file index
+    // but that requires opening the file handle. For now, return None.
+    let fs_inode = None;
+
+    (
+        ts_created,
+        ts_modified,
+        ts_accessed,
+        ts_changed,
+        unix_mode,
+        unix_owner_id,
+        unix_group_id,
+        fs_inode,
+    )
+}
+
 /// Process a file and extract its metadata and blob information.
 ///
 /// The `source_root` is used to compute the relative path for the file.
@@ -38,9 +131,16 @@ pub fn process_file(path: &Path, source_root: &Path) -> io::Result<FileInfo> {
         .to_string_lossy()
         .replace('\\', "/");
 
-    let ts_modified = metadata.mtime().checked_mul(1000);
-    let ts_accessed = metadata.atime().checked_mul(1000);
-    let ts_changed = metadata.ctime().checked_mul(1000);
+    let (
+        ts_created,
+        ts_modified,
+        ts_accessed,
+        ts_changed,
+        unix_mode,
+        unix_owner_id,
+        unix_group_id,
+        fs_inode,
+    ) = extract_platform_metadata(&metadata);
 
     // Handle special files
     let file_type = metadata.file_type();
@@ -76,14 +176,14 @@ pub fn process_file(path: &Path, source_root: &Path) -> io::Result<FileInfo> {
     Ok(FileInfo {
         relative_path,
         blob,
-        ts_created: None, // Linux doesn't have creation time in standard stat
+        ts_created,
         ts_modified,
         ts_accessed,
         ts_changed,
-        unix_mode: Some(metadata.permissions().mode()),
-        unix_owner_id: Some(metadata.uid()),
-        unix_group_id: Some(metadata.gid()),
-        fs_inode: Some(metadata.ino()),
+        unix_mode,
+        unix_owner_id,
+        unix_group_id,
+        fs_inode,
         special,
     })
 }
@@ -104,9 +204,16 @@ pub fn process_file_with_reader(
         .to_string_lossy()
         .replace('\\', "/");
 
-    let ts_modified = metadata.mtime().checked_mul(1000);
-    let ts_accessed = metadata.atime().checked_mul(1000);
-    let ts_changed = metadata.ctime().checked_mul(1000);
+    let (
+        ts_created,
+        ts_modified,
+        ts_accessed,
+        ts_changed,
+        unix_mode,
+        unix_owner_id,
+        unix_group_id,
+        fs_inode,
+    ) = extract_platform_metadata(&metadata);
 
     // Handle special files
     let file_type = metadata.file_type();
@@ -142,14 +249,14 @@ pub fn process_file_with_reader(
     Ok(FileInfo {
         relative_path,
         blob,
-        ts_created: None, // Linux doesn't have creation time in standard stat
+        ts_created,
         ts_modified,
         ts_accessed,
         ts_changed,
-        unix_mode: Some(metadata.permissions().mode()),
-        unix_owner_id: Some(metadata.uid()),
-        unix_group_id: Some(metadata.gid()),
-        fs_inode: Some(metadata.ino()),
+        unix_mode,
+        unix_owner_id,
+        unix_group_id,
+        fs_inode,
         special,
     })
 }

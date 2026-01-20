@@ -2,33 +2,44 @@
 //!
 //! Provides functions to get filesystem type, UUID, and hostname.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+use std::fs::File;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::AsRawFd;
+
+#[cfg(unix)]
 use nix::libc;
+#[cfg(unix)]
 use nix::sys::statfs::statfs;
 
 /// BTRFS ioctl magic number
+#[cfg(target_os = "linux")]
 const BTRFS_IOCTL_MAGIC: u8 = 0x94;
 
 /// BTRFS_IOC_SUBVOL_GETFLAGS = _IOR(0x94, 25, u64)
 /// Formula: (2 << 30) | (type << 8) | nr | (size << 16)
+#[cfg(target_os = "linux")]
 const BTRFS_IOC_SUBVOL_GETFLAGS: libc::c_ulong =
     (2 << 30) | ((BTRFS_IOCTL_MAGIC as libc::c_ulong) << 8) | 25 | (8 << 16);
 
 /// BTRFS subvolume read-only flag
+#[cfg(target_os = "linux")]
 const BTRFS_SUBVOL_RDONLY: u64 = 1 << 1;
 
 /// BTRFS filesystem magic number
+#[cfg(target_os = "linux")]
 const BTRFS_SUPER_MAGIC: u64 = 0x9123683E;
 
 /// Information about a filesystem.
 #[derive(Debug, Clone)]
 pub struct FsInfo {
-    /// The filesystem type (e.g., "btrfs", "ext4", "xfs")
+    /// The filesystem type (e.g., "btrfs", "ext4", "xfs", "ntfs")
     pub fs_type: Option<String>,
     /// The filesystem UUID if available
     pub fs_id: Option<String>,
@@ -40,6 +51,7 @@ pub fn get_hostname() -> Option<String> {
 }
 
 /// Get filesystem information for a path.
+#[cfg(unix)]
 pub fn get_fs_info(path: &Path) -> io::Result<FsInfo> {
     let stat = statfs(path).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
@@ -52,7 +64,80 @@ pub fn get_fs_info(path: &Path) -> io::Result<FsInfo> {
     Ok(FsInfo { fs_type, fs_id })
 }
 
+/// Get filesystem information for a path (Windows implementation).
+#[cfg(windows)]
+pub fn get_fs_info(path: &Path) -> io::Result<FsInfo> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+
+    // Get the volume path (e.g., "C:\")
+    let path_wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut volume_path = vec![0u16; 261]; // MAX_PATH + 1
+
+    let result = unsafe {
+        GetVolumePathNameW(
+            path_wide.as_ptr(),
+            volume_path.as_mut_ptr(),
+            volume_path.len() as u32,
+        )
+    };
+
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Get volume information
+    let mut fs_name = vec![0u16; 261];
+    let mut volume_serial: u32 = 0;
+
+    let result = unsafe {
+        GetVolumeInformationW(
+            volume_path.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut volume_serial,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            fs_name.as_mut_ptr(),
+            fs_name.len() as u32,
+        )
+    };
+
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Convert filesystem name from wide string
+    let fs_type = {
+        let len = fs_name
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(fs_name.len());
+        let name = String::from_utf16_lossy(&fs_name[..len]);
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_lowercase())
+        }
+    };
+
+    // Use volume serial number as a pseudo-UUID
+    let fs_id = if volume_serial != 0 {
+        Some(format!("{:08X}", volume_serial))
+    } else {
+        None
+    };
+
+    Ok(FsInfo { fs_type, fs_id })
+}
+
 /// Convert a filesystem magic number to a human-readable name.
+#[cfg(unix)]
 fn get_fs_type_name(magic: u64) -> Option<String> {
     // Common filesystem magic numbers (from statfs.h / magic.h)
     let name = match magic {
@@ -103,7 +188,8 @@ fn get_fs_type_name(magic: u64) -> Option<String> {
     Some(name.to_string())
 }
 
-/// Try to get the filesystem UUID from /sys/dev/block.
+/// Try to get the filesystem UUID from /sys/dev/block (Linux-specific).
+#[cfg(target_os = "linux")]
 fn get_fs_uuid(path: &Path) -> io::Result<Option<String>> {
     // Get the device ID from the path's metadata
     let metadata = fs::metadata(path)?;
@@ -160,10 +246,19 @@ fn get_fs_uuid(path: &Path) -> io::Result<Option<String>> {
     Ok(None)
 }
 
+/// Try to get the filesystem UUID (non-Linux Unix fallback).
+#[cfg(all(unix, not(target_os = "linux")))]
+fn get_fs_uuid(_path: &Path) -> io::Result<Option<String>> {
+    // On macOS/FreeBSD, getting the UUID is more complex and varies by filesystem
+    // For now, return None
+    Ok(None)
+}
+
 /// Check if a path is on a read-only filesystem or btrfs read-only snapshot.
 ///
 /// This checks both the mount flags (ST_RDONLY) and, for btrfs filesystems,
 /// the subvolume read-only property which is used for read-only snapshots.
+#[cfg(target_os = "linux")]
 pub fn is_readonly(path: &Path) -> io::Result<bool> {
     let stat = statfs(path).map_err(|e| io::Error::other(e))?;
 
@@ -182,10 +277,33 @@ pub fn is_readonly(path: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
+/// Check if a path is on a read-only filesystem (non-Linux Unix).
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn is_readonly(path: &Path) -> io::Result<bool> {
+    let stat = statfs(path).map_err(|e| io::Error::other(e))?;
+
+    // Check if ST_RDONLY mount flag is set
+    if stat.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY) {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+/// Check if a path is on a read-only filesystem (Windows).
+#[cfg(windows)]
+pub fn is_readonly(path: &Path) -> io::Result<bool> {
+    // On Windows, check if the file/directory has the read-only attribute
+    // Note: This is different from Unix where we check the filesystem mount
+    let metadata = fs::metadata(path)?;
+    Ok(metadata.permissions().readonly())
+}
+
 /// Check if a btrfs subvolume is marked read-only.
 ///
 /// This uses the BTRFS_IOC_SUBVOL_GETFLAGS ioctl to check the subvolume's
 /// read-only property, which is set on read-only snapshots.
+#[cfg(target_os = "linux")]
 fn is_btrfs_subvol_readonly(path: &Path) -> io::Result<bool> {
     let file = File::open(path)?;
     let fd = file.as_raw_fd();
@@ -216,15 +334,26 @@ mod tests {
 
     #[test]
     fn test_get_fs_info() {
-        let info = get_fs_info(Path::new("/")).unwrap();
+        // Use a path that exists on all platforms
+        #[cfg(windows)]
+        let test_path = Path::new("C:\\");
+        #[cfg(not(windows))]
+        let test_path = Path::new("/");
+
+        let info = get_fs_info(test_path).unwrap();
         // Root filesystem should have a type
         assert!(info.fs_type.is_some());
     }
 
     #[test]
     fn test_is_readonly() {
-        // Root is typically writable
-        let readonly = is_readonly(Path::new("/tmp")).unwrap();
+        // Use a path that exists on all platforms and is typically writable
+        #[cfg(windows)]
+        let test_path = std::env::temp_dir();
+        #[cfg(not(windows))]
+        let test_path = std::path::PathBuf::from("/tmp");
+
+        let readonly = is_readonly(&test_path).unwrap();
         assert!(!readonly);
     }
 }
