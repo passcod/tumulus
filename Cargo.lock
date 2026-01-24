@@ -2265,6 +2265,7 @@ dependencies = [
  "hex",
  "hostname",
  "jiff",
+ "linux-raw-sys 0.12.1",
  "lloggs",
  "machine-uid",
  "memmap2",

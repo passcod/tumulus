@@ -2,41 +2,21 @@
 //!
 //! Provides functions to get filesystem type, UUID, and hostname.
 
-use std::fs;
-use std::io;
-use std::path::Path;
+use std::{fs, io, path::Path};
+#[cfg(target_os = "linux")]
+use std::{
+    fs::File,
+    os::unix::{fs::MetadataExt, io::AsRawFd},
+};
 
 #[cfg(target_os = "linux")]
-use std::fs::File;
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::MetadataExt;
-#[cfg(target_os = "linux")]
-use std::os::unix::io::AsRawFd;
-
+use linux_raw_sys::{
+    btrfs::BTRFS_SUBVOL_RDONLY, general::BTRFS_SUPER_MAGIC, ioctl::BTRFS_IOC_SUBVOL_GETFLAGS,
+};
 #[cfg(target_os = "linux")]
 use nix::libc;
 #[cfg(unix)]
-use nix::sys::statfs::statfs;
-#[cfg(unix)]
-use nix::sys::statvfs::statvfs;
-
-/// BTRFS ioctl magic number
-#[cfg(target_os = "linux")]
-const BTRFS_IOCTL_MAGIC: u8 = 0x94;
-
-/// BTRFS_IOC_SUBVOL_GETFLAGS = _IOR(0x94, 25, u64)
-/// Formula: (2 << 30) | (type << 8) | nr | (size << 16)
-#[cfg(target_os = "linux")]
-const BTRFS_IOC_SUBVOL_GETFLAGS: libc::c_ulong =
-    (2 << 30) | ((BTRFS_IOCTL_MAGIC as libc::c_ulong) << 8) | 25 | (8 << 16);
-
-/// BTRFS subvolume read-only flag
-#[cfg(target_os = "linux")]
-const BTRFS_SUBVOL_RDONLY: u64 = 1 << 1;
-
-/// BTRFS filesystem magic number
-#[cfg(target_os = "linux")]
-const BTRFS_SUPER_MAGIC: u64 = 0x9123683E;
+use nix::sys::{statfs::statfs, statvfs::statvfs};
 
 /// Information about a filesystem.
 #[derive(Debug, Clone)]
@@ -284,7 +264,7 @@ pub fn is_readonly(path: &Path) -> io::Result<bool> {
 
     // For btrfs, also check the subvolume read-only flag
     let statfs_result = statfs(path).map_err(io::Error::other)?;
-    if statfs_result.filesystem_type().0 as u64 == BTRFS_SUPER_MAGIC
+    if statfs_result.filesystem_type().0 as u64 == BTRFS_SUPER_MAGIC as u64
         && let Ok(readonly) = is_btrfs_subvol_readonly(path)
     {
         return Ok(readonly);
@@ -324,13 +304,19 @@ fn is_btrfs_subvol_readonly(path: &Path) -> io::Result<bool> {
 
     // SAFETY: We're calling ioctl with a valid fd and a pointer to a u64.
     // The ioctl reads flags into the provided buffer.
-    let result = unsafe { libc::ioctl(fd, BTRFS_IOC_SUBVOL_GETFLAGS, &mut flags as *mut u64) };
+    let result = unsafe {
+        libc::ioctl(
+            fd,
+            BTRFS_IOC_SUBVOL_GETFLAGS as libc::c_ulong,
+            &mut flags as *mut u64,
+        )
+    };
 
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
 
-    Ok((flags & BTRFS_SUBVOL_RDONLY) != 0)
+    Ok((flags & BTRFS_SUBVOL_RDONLY as u64) != 0)
 }
 
 #[cfg(test)]
