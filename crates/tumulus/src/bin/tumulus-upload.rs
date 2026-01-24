@@ -328,7 +328,6 @@ fn run(args: Args) -> Result<(), UploadError> {
                 &client,
                 server_url,
                 server_id,
-                &checksum_hex,
                 &args.catalog,
                 &args.reference,
             )?
@@ -428,7 +427,6 @@ fn try_delta_upload(
     client: &Client,
     server_url: &str,
     catalog_id: Uuid,
-    checksum_hex: &str,
     target_catalog: &Path,
     reference_paths: &[PathBuf],
 ) -> Result<Option<UploadResponse>, UploadError> {
@@ -505,6 +503,9 @@ fn try_delta_upload(
         "Decompressed catalogs for diff"
     );
 
+    // Read the compressed catalog size for comparison
+    let compressed_catalog_size = fs::metadata(target_catalog)?.len();
+
     // Generate binary diff using qbsdiff
     let mut patch_data = Vec::new();
     qbsdiff::Bsdiff::new(&reference_data, &target_data)
@@ -522,14 +523,19 @@ fn try_delta_upload(
         encoder.finish().map_err(UploadError::Io)?;
     }
 
-    info!(
+    let savings = compressed_catalog_size as f64 - compressed_patch.len() as f64;
+    let savings_pct = (savings / compressed_catalog_size as f64) * 100.0;
+
+    debug!(
         compressed_patch_size = compressed_patch.len(),
-        compression_ratio = format!(
-            "{:.1}%",
-            (compressed_patch.len() as f64 / patch_data.len() as f64) * 100.0
-        ),
-        "Compressed patch"
+        compressed_catalog_size = compressed_catalog_size,
+        savings_bytes = savings as i64,
+        savings_pct = format!("{:.1}%", savings_pct),
+        "Delta upload: patch vs full catalog"
     );
+
+    // Compute checksum of the decompressed target (what the patch reconstructs)
+    let target_checksum = blake3::hash(&target_data).to_hex().to_string();
 
     // Upload via patch endpoint
     let url = format!(
@@ -537,7 +543,7 @@ fn try_delta_upload(
         server_url,
         catalog_id.simple(),
         best_reference.id.simple(),
-        checksum_hex
+        target_checksum
     );
 
     let resp = client
