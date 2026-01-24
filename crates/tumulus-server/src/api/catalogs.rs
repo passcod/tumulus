@@ -198,7 +198,7 @@ async fn initiate_upload<S: Storage>(
 
             // Now do async storage check outside of lock
             let missing = get_missing_extents_from_ids(&state.storage, extent_ids).await?;
-            let missing_hex: Vec<String> = missing.iter().map(hex::encode).collect();
+            let missing_hex: Vec<String> = missing.iter().map(|id| id.as_hex()).collect();
 
             Ok((
                 StatusCode::OK,
@@ -285,7 +285,7 @@ async fn upload_catalog<S: Storage>(
         UploadCheckResult::AlreadyUploaded { extent_ids } => {
             // Just return missing extents
             let missing = get_missing_extents_from_ids(&state.storage, extent_ids).await?;
-            let missing_hex: Vec<String> = missing.iter().map(hex::encode).collect();
+            let missing_hex: Vec<String> = missing.iter().map(|id| id.as_hex()).collect();
             Ok(Json(UploadResponse {
                 missing_extents: missing_hex,
             }))
@@ -295,7 +295,7 @@ async fn upload_catalog<S: Storage>(
             let actual_checksum = blake3::hash(&body);
             if actual_checksum != expected_checksum.0 {
                 return Err(CatalogError::ChecksumMismatch {
-                    expected: hex::encode(expected_checksum),
+                    expected: expected_checksum.as_hex(),
                     actual: actual_checksum.to_hex().to_string(),
                 });
             }
@@ -312,7 +312,7 @@ async fn upload_catalog<S: Storage>(
                 process_catalog_contents(&state, catalog_id, &body, "Parsed catalog contents")
                     .await?;
 
-            let missing_hex: Vec<String> = missing_extents.iter().map(hex::encode).collect();
+            let missing_hex: Vec<String> = missing_extents.iter().map(|id| id.as_hex()).collect();
 
             Ok(Json(UploadResponse {
                 missing_extents: missing_hex,
@@ -354,11 +354,11 @@ async fn process_catalog_contents<S: Storage>(
             match state.storage.put_blob(&blob_id, encoded).await {
                 Ok(created) => {
                     if created {
-                        debug!(blob_id = %hex::encode(blob_id), "Stored new blob layout");
+                        debug!(blob_id = %blob_id.as_hex(), "Stored new blob layout");
                     }
                 }
                 Err(e) => {
-                    warn!(blob_id = %hex::encode(blob_id), error = %e, "Failed to store blob layout");
+                    warn!(blob_id = %blob_id.as_hex(), error = %e, "Failed to store blob layout");
                 }
             }
         }
@@ -445,7 +445,7 @@ async fn upload_catalog_patch<S: Storage>(
     let actual_checksum = blake3::hash(&target_decompressed);
     if actual_checksum != expected_checksum.0 {
         return Err(CatalogError::ChecksumMismatch {
-            expected: hex::encode(expected_checksum),
+            expected: expected_checksum.as_hex(),
             actual: actual_checksum.to_hex().to_string(),
         });
     }
@@ -490,7 +490,7 @@ async fn upload_catalog_patch<S: Storage>(
     )
     .await?;
 
-    let missing_hex: Vec<String> = missing_extents.iter().map(hex::encode).collect();
+    let missing_hex: Vec<String> = missing_extents.iter().map(|id| id.as_hex()).collect();
 
     Ok(Json(UploadResponse {
         missing_extents: missing_hex,
@@ -569,7 +569,7 @@ async fn finalize_upload<S: Storage>(
                 Ok((StatusCode::NO_CONTENT, Json(None::<FinalizeResponse>)).into_response())
             } else {
                 // Some extents are still missing
-                let missing_hex: Vec<String> = missing.iter().map(hex::encode).collect();
+                let missing_hex: Vec<String> = missing.iter().map(|id| id.as_hex()).collect();
                 info!(
                     catalog_id = %catalog_id,
                     missing_count = missing.len(),

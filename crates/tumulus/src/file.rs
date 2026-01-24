@@ -2,6 +2,8 @@
 
 use std::{fs, io, path::Path};
 
+use crate::B3Id;
+
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -167,7 +169,7 @@ pub fn process_file(path: &Path, source_root: &Path) -> io::Result<FileInfo> {
     } else if metadata.is_file() {
         // Zero-sized file still gets a blob
         Some(BlobInfo {
-            blob_id: *blake3::hash(&[]).as_bytes(),
+            blob_id: B3Id::hash(&[]),
             bytes: 0,
             extents: Vec::new(),
         })
@@ -240,7 +242,7 @@ pub fn process_file_with_reader(
     } else if metadata.is_file() {
         // Zero-sized file still gets a blob
         Some(BlobInfo {
-            blob_id: *blake3::hash(&[]).as_bytes(),
+            blob_id: B3Id::hash(&[]),
             bytes: 0,
             extents: Vec::new(),
         })

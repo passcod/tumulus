@@ -8,6 +8,7 @@ pub mod compression;
 pub mod extents;
 pub mod file;
 pub mod fsinfo;
+pub mod id;
 pub mod machine;
 pub mod tree;
 
@@ -22,5 +23,6 @@ pub use extents::{
 };
 pub use file::{FileInfo, process_file, process_file_with_reader};
 pub use fsinfo::{FsInfo, get_fs_info, get_hostname, is_readonly};
+pub use id::B3Id;
 pub use machine::get_machine_id;
 pub use tree::compute_tree_hash;

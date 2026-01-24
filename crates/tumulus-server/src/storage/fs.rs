@@ -34,7 +34,7 @@ impl FsStorage {
     /// Convert a 32-byte ID to a sharded path.
     /// Example: ab/cd/ef0123456789... (first 2 bytes as subdirs)
     fn sharded_path(&self, prefix: &str, id: &B3Id) -> PathBuf {
-        let hex = hex::encode(id);
+        let hex = id.as_hex();
         self.base_path
             .join(prefix)
             .join(&hex[0..2])
@@ -113,7 +113,7 @@ impl Storage for FsStorage {
             // Clean up temp file
             let _ = fs::remove_file(&temp_path).await;
             return Err(StorageError::HashMismatch {
-                expected: hex::encode(id),
+                expected: id.as_hex(),
                 actual: actual.to_hex().to_string(),
             });
         }

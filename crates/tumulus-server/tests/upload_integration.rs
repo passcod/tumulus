@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use tumulus::{create_catalog_schema, process_file, write_catalog};
+use tumulus::{B3Id, create_catalog_schema, process_file, write_catalog};
 use tumulus_server::{FsStorage, UploadDb, router};
 
 /// Request body for initiating a catalog upload.
@@ -249,7 +249,8 @@ impl TestFixture {
             let rows = stmt
                 .query_map([], |row| {
                     let extent_id: Vec<u8> = row.get(0)?;
-                    Ok(hex::encode(extent_id))
+                    let id = B3Id::try_from(extent_id).expect("Invalid extent ID");
+                    Ok(id.as_hex())
                 })
                 .unwrap();
             rows.map(|r| r.unwrap()).collect::<Vec<_>>()

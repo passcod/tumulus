@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use blake3::Hasher;
 
+use crate::B3Id;
 use crate::file::FileInfo;
 
 /// Compute the tree hash for a set of files.
@@ -18,9 +19,9 @@ use crate::file::FileInfo;
 /// - 32 bytes: blob ID
 ///
 /// Files without blobs (special files like symlinks) are not included in the tree hash.
-pub fn compute_tree_hash(files: &[FileInfo]) -> [u8; 32] {
+pub fn compute_tree_hash(files: &[FileInfo]) -> B3Id {
     // Build sorted tree map: path -> blob_id
-    let mut tree_entries: BTreeMap<&str, &[u8; 32]> = BTreeMap::new();
+    let mut tree_entries: BTreeMap<&str, &B3Id> = BTreeMap::new();
 
     for file in files {
         if let Some(ref blob) = file.blob {
@@ -35,8 +36,8 @@ pub fn compute_tree_hash(files: &[FileInfo]) -> [u8; 32] {
         let path_len = (path_bytes.len() as u32).to_le_bytes();
         hasher.update(&path_len);
         hasher.update(path_bytes);
-        hasher.update(blob_id);
+        hasher.update(blob_id.as_slice());
     }
 
-    *hasher.finalize().as_bytes()
+    B3Id::from(hasher.finalize())
 }

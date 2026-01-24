@@ -89,14 +89,14 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
                     let start = (range.offset as usize).min(file_len);
                     let end = (start + range.length as usize).min(file_len);
                     let slice = &mmap[start..end];
-                    let extent_id = blake3::hash(slice);
+                    let extent_id = tumulus::B3Id::hash(slice);
 
                     extent_displays.push(ExtentDisplay {
                         logical_offset: range.offset,
                         length: (end - start) as u64,
                         flags: String::new(),
                         is_sparse: false,
-                        hash: Some(hex::encode(extent_id.as_bytes())),
+                        hash: Some(extent_id.as_hex()),
                         bytes_read: end - start,
                     });
                 }

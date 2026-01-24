@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     metadata.insert("protocol", json!(1));
     metadata.insert("id", json!(catalog_id.simple().to_string()));
     metadata.insert("machine", json!(machine_id));
-    metadata.insert("tree", json!(hex::encode(tree_hash)));
+    metadata.insert("tree", json!(tree_hash.as_hex()));
     metadata.insert("created", json!(created.as_millisecond()));
 
     // Optional metadata - started and source_path
@@ -219,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(?catalog_path, "Catalog written");
     eprintln!("Catalog written to {:?}", catalog_path);
     eprintln!("  ID: {}", catalog_id);
-    eprintln!("  Tree hash: {}", hex::encode(tree_hash));
+    eprintln!("  Tree hash: {}", tree_hash.as_hex());
     eprintln!("  Files: {}", stats.file_count);
     eprintln!(
         "  Extents: {} ({} unique)",

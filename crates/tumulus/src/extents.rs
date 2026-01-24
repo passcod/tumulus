@@ -7,13 +7,15 @@ use extentria::{DataRange, RangeReader, RangeReaderImpl};
 use memmap2::Mmap;
 use tracing::debug;
 
+use crate::B3Id;
+
 /// Maximum size for a single extent chunk (128 KB).
 pub const MAX_EXTENT_SIZE: u64 = 128 * 1024;
 
 /// Information about a file extent
 #[derive(Debug, Clone)]
 pub struct ExtentInfo {
-    pub extent_id: [u8; 32],
+    pub extent_id: B3Id,
     pub range: DataRange,
     /// Filesystem extent index - incremented for each new filesystem extent.
     /// Multiple ExtentInfo entries with the same fs_extent value are subchunks
@@ -24,7 +26,7 @@ pub struct ExtentInfo {
 /// Information about a file's blob
 #[derive(Debug, Clone)]
 pub struct BlobInfo {
-    pub blob_id: [u8; 32],
+    pub blob_id: B3Id,
     pub bytes: u64,
     pub extents: Vec<ExtentInfo>,
 }
@@ -37,7 +39,7 @@ fn range_to_extent_infos(range: DataRange, mmap: &Mmap, fs_extent: u32) -> Vec<E
     if range.hole {
         // Sparse holes are not subchunked
         return vec![ExtentInfo {
-            extent_id: [0u8; 32],
+            extent_id: B3Id::from([0u8; 32]),
             range,
             fs_extent,
         }];
@@ -54,7 +56,7 @@ fn range_to_extent_infos(range: DataRange, mmap: &Mmap, fs_extent: u32) -> Vec<E
     // If extent fits in one chunk, no subchunking needed
     if total_len <= MAX_EXTENT_SIZE {
         let slice = &mmap[start..end];
-        let extent_id = *blake3::hash(slice).as_bytes();
+        let extent_id = B3Id::hash(slice);
 
         return vec![ExtentInfo {
             extent_id,
@@ -73,7 +75,7 @@ fn range_to_extent_infos(range: DataRange, mmap: &Mmap, fs_extent: u32) -> Vec<E
         let chunk_len = (chunk_end - chunk_start) as u64;
 
         let slice = &mmap[chunk_start..chunk_end];
-        let extent_id = *blake3::hash(slice).as_bytes();
+        let extent_id = B3Id::hash(slice);
 
         debug!(
             fs_extent,
@@ -106,7 +108,7 @@ pub fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
 
     if file_len == 0 {
         return Ok(Some(BlobInfo {
-            blob_id: *blake3::hash(&[]).as_bytes(),
+            blob_id: B3Id::hash(&[]),
             bytes: 0,
             extents: Vec::new(),
         }));
@@ -127,7 +129,7 @@ pub fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
 
         let mut blob_hasher = Hasher::new();
         blob_hasher.update(&mmap[..]);
-        let blob_id = *blob_hasher.finalize().as_bytes();
+        let blob_id = B3Id::from(blob_hasher.finalize());
 
         return Ok(Some(BlobInfo {
             blob_id,
@@ -150,7 +152,7 @@ pub fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
     // Compute blob hash (hash of full file contents)
     let mut blob_hasher = Hasher::new();
     blob_hasher.update_rayon(&mmap[..]);
-    let blob_id = *blob_hasher.finalize().as_bytes();
+    let blob_id = B3Id::from(blob_hasher.finalize());
 
     Ok(Some(BlobInfo {
         blob_id,
@@ -172,7 +174,7 @@ pub fn process_file_extents_with_reader(
 
     if file_len == 0 {
         return Ok(Some(BlobInfo {
-            blob_id: *blake3::hash(&[]).as_bytes(),
+            blob_id: B3Id::hash(&[]),
             bytes: 0,
             extents: Vec::new(),
         }));
@@ -192,7 +194,7 @@ pub fn process_file_extents_with_reader(
 
         let mut blob_hasher = Hasher::new();
         blob_hasher.update(&mmap[..]);
-        let blob_id = *blob_hasher.finalize().as_bytes();
+        let blob_id = B3Id::from(blob_hasher.finalize());
 
         return Ok(Some(BlobInfo {
             blob_id,
@@ -215,7 +217,7 @@ pub fn process_file_extents_with_reader(
     // Compute blob hash (hash of full file contents)
     let mut blob_hasher = Hasher::new();
     blob_hasher.update_rayon(&mmap[..]);
-    let blob_id = *blob_hasher.finalize().as_bytes();
+    let blob_id = B3Id::from(blob_hasher.finalize());
 
     Ok(Some(BlobInfo {
         blob_id,

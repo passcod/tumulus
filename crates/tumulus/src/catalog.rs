@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, params};
 
+use crate::B3Id;
 use crate::extents::ExtentInfo;
 use crate::file::FileInfo;
 
@@ -109,7 +110,7 @@ pub fn create_catalog_schema(conn: &Connection) -> rusqlite::Result<()> {
 pub fn write_catalog(conn: &Connection, file_infos: &[FileInfo]) -> rusqlite::Result<CatalogStats> {
     // Deduplicate blobs before inserting - only process each unique blob once
     // Also deduplicate extents within each blob by offset
-    let mut seen_blobs: HashMap<[u8; 32], Vec<&ExtentInfo>> = HashMap::new();
+    let mut seen_blobs: HashMap<B3Id, Vec<&ExtentInfo>> = HashMap::new();
     for file_info in file_infos {
         if let Some(ref blob) = file_info.blob {
             seen_blobs.entry(blob.blob_id).or_insert_with(|| {
@@ -126,7 +127,7 @@ pub fn write_catalog(conn: &Connection, file_infos: &[FileInfo]) -> rusqlite::Re
     }
 
     // Also collect blob metadata (bytes, extent count) separately
-    let mut blob_metadata: HashMap<[u8; 32], (u64, usize)> = HashMap::new();
+    let mut blob_metadata: HashMap<B3Id, (u64, usize)> = HashMap::new();
     for file_info in file_infos {
         if let Some(ref blob) = file_info.blob {
             blob_metadata.entry(blob.blob_id).or_insert_with(|| {
