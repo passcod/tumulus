@@ -211,7 +211,7 @@ impl WindowsRangeIter<'_> {
     /// Handle the end of iteration, returning trailing sparse hole if needed.
     fn handle_end(&mut self) -> Option<io::Result<DataRange>> {
         if self.current_pos < self.file_size {
-            let hole = DataRange::sparse(self.current_pos, self.file_size - self.current_pos);
+            let hole = DataRange::hole(self.current_pos, self.file_size - self.current_pos);
             self.current_pos = self.file_size;
             self.done = true;
             Some(Ok(hole))
@@ -273,7 +273,7 @@ impl Iterator for WindowsRangeIter<'_> {
 
         // Check for sparse hole before this range
         if offset > self.current_pos {
-            let hole = DataRange::sparse(self.current_pos, offset - self.current_pos);
+            let hole = DataRange::hole(self.current_pos, offset - self.current_pos);
             // Store the data range to return on next iteration
             self.pending_data = Some(DataRange::new(offset, length));
             self.current_pos = offset + length;

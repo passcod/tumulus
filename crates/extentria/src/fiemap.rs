@@ -1,16 +1,10 @@
 use std::{
-    fs::File,
     io::{Error, Result},
-    mem::{take, transmute},
-    os::fd::{AsFd, AsRawFd, BorrowedFd},
+    mem::take,
+    os::fd::{AsRawFd, BorrowedFd},
 };
 
-use linux_raw_sys::ioctl::{
-    FIEMAP_EXTENT_DATA_ENCRYPTED, FIEMAP_EXTENT_DATA_INLINE, FIEMAP_EXTENT_DATA_TAIL,
-    FIEMAP_EXTENT_DELALLOC, FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_MERGED,
-    FIEMAP_EXTENT_NOT_ALIGNED, FIEMAP_EXTENT_SHARED, FIEMAP_EXTENT_UNKNOWN,
-    FIEMAP_EXTENT_UNWRITTEN, FIEMAP_FLAG_CACHE, FIEMAP_FLAG_SYNC, FIEMAP_FLAG_XATTR, FS_IOC_FIEMAP,
-};
+use linux_raw_sys::ioctl::{FIEMAP_EXTENT_LAST, FS_IOC_FIEMAP};
 use zerocopy::{FromBytes, IntoBytes as _, KnownLayout};
 use zerocopy_derive::*;
 
@@ -74,46 +68,6 @@ impl FiemapExtent {
     pub fn last(&self) -> bool {
         self.flags & FIEMAP_EXTENT_LAST != 0
     }
-
-    pub fn location_unknown(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_UNKNOWN != 0
-    }
-
-    pub fn delayed_allocation(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_DELALLOC != 0
-    }
-
-    pub fn encoded(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_ENCODED != 0
-    }
-
-    pub fn encrypted(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_DATA_ENCRYPTED != 0
-    }
-
-    pub fn not_aligned(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_NOT_ALIGNED != 0
-    }
-
-    pub fn inline(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_DATA_INLINE != 0
-    }
-
-    pub fn packed(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_DATA_TAIL != 0
-    }
-
-    pub fn unwritten(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_UNWRITTEN != 0
-    }
-
-    pub fn simulated(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_MERGED != 0
-    }
-
-    pub fn shared(&self) -> bool {
-        self.flags & FIEMAP_EXTENT_SHARED != 0
-    }
 }
 
 /// The size of the request structure (exclusive of the results buf), in bytes.
@@ -137,40 +91,6 @@ pub fn minimum_buf_size() -> usize {
 }
 
 impl FiemapLookup {
-    /// Lookup extents for a particular file.
-    ///
-    /// This is a shorthand for `FiemapLookup::for_file_size(size).with_buf_size(fd, buf_size)`
-    /// which automatically calculates a best-guess for the size for the buffer and handles
-    /// obtaining the FD etc. It's appropriate for one-off lookups and exploration.
-    ///
-    /// The buffer size calculation makes the assumption that it will on average be called on files:
-    /// - that are not sparse or internally deduplicated (so they are uniformly extented)
-    /// - that have a compressible first extent (so compression is enabled for the file)
-    ///
-    /// When both of these conditions hold, a file will most likely have SIZE/128KB extents or less.
-    /// Thus we can allocate a buffer that will hold that many results and only perform a single
-    /// lookup for most files under a gigabyte. The buffer is limited to 1 MiB to avoid allocating
-    /// and zeroing too much memory repeatedly.
-    ///
-    /// When performing lookups in batches, you most likely will want to use your own buffer size
-    /// appropriately for your application. See the [`with_buf_size()`](Self::with_buf_size())
-    /// documentation for more details.
-    pub fn extents_for_file(file: &File) -> Result<FiemapSearchResults<'_>> {
-        let stat = file.metadata()?;
-        let file_size = stat.len();
-
-        // the upper limit is hardcoded to 16MB here:
-        // https://github.com/torvalds/linux/blob/master/fs/btrfs/ioctl.c#L1705
-        // but we set a 1MB maximum to avoid doing too large allocations.
-        //
-        // in between, calculate from file_size
-        let buf_size = ((file_size as usize) / (128 * 1024) * result_size())
-            .max(3 * result_size())
-            .min(1024_usize.pow(2));
-
-        Self::for_file_size(file_size).with_buf_size(file.as_fd(), buf_size)
-    }
-
     /// Create a new lookup that covers the entire spread of a file, by the size of that file.
     pub fn for_file_size(file_size: u64) -> Self {
         Self {
@@ -178,37 +98,6 @@ impl FiemapLookup {
             length: file_size,
             flags: 0,
         }
-    }
-
-    /// Start the result set from an offset.
-    ///
-    /// This is mainly used internally for pagination.
-    pub fn from_offset(self, offset: u64) -> Self {
-        Self {
-            start: offset,
-            ..self
-        }
-    }
-
-    /// Set the sync flag (syncs the filesystem before lookup).
-    pub fn after_sync(self) -> Self {
-        let mut this = self;
-        this.flags |= FIEMAP_FLAG_SYNC;
-        this
-    }
-
-    /// Set the xattr flag (searches the xattr tree instead).
-    pub fn on_xattr_tree(self) -> Self {
-        let mut this = self;
-        this.flags |= FIEMAP_FLAG_XATTR;
-        this
-    }
-
-    /// Set the cache flag (requests that returned extents be cached).
-    pub fn and_cache(self) -> Self {
-        let mut this = self;
-        this.flags |= FIEMAP_FLAG_CACHE;
-        this
     }
 
     /// Execute an extent lookup on the filesystem.
@@ -399,34 +288,6 @@ pub struct FiemapSearchResults<'fd> {
     next_search_offset: Option<u64>,
     fd: Option<BorrowedFd<'fd>>,
     seen_last_extent: bool,
-}
-
-impl FiemapSearchResults<'_> {
-    /// Destroys this iterator but keep the buffer.
-    ///
-    /// It can be useful to re-use the buffer for another search instead of allocating a new one.
-    pub fn into_buf(self) -> Box<[u8]> {
-        self.buf
-    }
-
-    /// The number of items the kernel returned.
-    ///
-    /// This may vary when the iterator pages through the results.
-    pub fn nr_items(&self) -> u32 {
-        self.response.written
-    }
-
-    /// Prevent further pagination.
-    ///
-    /// This has two purpose: first, obviously, to stop pagination; second it releases the borrowed
-    /// FD and returns a result iterator that is `'static`.
-    pub fn stop_paginating(self) -> FiemapSearchResults<'static> {
-        let mut this = self;
-        this.fd = None;
-
-        // SAFETY: the fd is no longer held, so the only lifetime remaining is owned data ('static)
-        unsafe { transmute(this) }
-    }
 }
 
 impl<'f> Iterator for FiemapSearchResults<'f> {

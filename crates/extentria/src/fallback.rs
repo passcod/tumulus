@@ -3,8 +3,7 @@
 //! This is used on platforms where we don't have a way to query extent information.
 //! It simply returns the entire file as a single data range.
 
-use std::fs::File;
-use std::io;
+use std::{fs::File, io};
 
 use crate::types::{DataRange, RangeIter, RangeReaderImpl, private::Sealed};
 

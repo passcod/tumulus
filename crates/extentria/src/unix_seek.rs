@@ -46,8 +46,7 @@ impl Iterator for SeekRangeIter {
             Err(e) if e.raw_os_error() == Some(libc::ENXIO) => {
                 // No more data - rest is sparse or we're at EOF
                 if self.current_pos < self.file_size {
-                    let hole =
-                        DataRange::sparse(self.current_pos, self.file_size - self.current_pos);
+                    let hole = DataRange::hole(self.current_pos, self.file_size - self.current_pos);
                     self.done = true;
                     return Some(Ok(hole));
                 }
@@ -58,7 +57,7 @@ impl Iterator for SeekRangeIter {
 
         // If there's a hole before data, return it
         if data_start > self.current_pos {
-            let hole = DataRange::sparse(self.current_pos, data_start - self.current_pos);
+            let hole = DataRange::hole(self.current_pos, data_start - self.current_pos);
             self.current_pos = data_start;
             return Some(Ok(hole));
         }

@@ -1,21 +1,21 @@
 //! Cross-platform file extent/range information.
 //!
 //! This crate provides a unified API for reading how files are laid out
-//! on disk, including detection of sparse holes and (on Linux) shared extents.
+//! on disk, including detection of sparse holes.
 
-use std::fs::File;
-use std::io;
+use std::{fs::File, io};
+
+pub use types::{DataRange, RangeIter, RangeReaderImpl};
 
 mod types;
-pub use types::{DataRange, RangeFlags, RangeIter, RangeReaderImpl};
 
 // Platform-specific implementations
 #[cfg(target_os = "linux")]
-pub mod fiemap;
+mod fiemap;
 #[cfg(target_os = "linux")]
 mod linux;
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 mod unix_seek;
 
 #[cfg(target_os = "macos")]
@@ -64,11 +64,6 @@ pub fn ranges_for_file(file: &File) -> io::Result<Vec<DataRange>> {
     use crate::types::RangeReaderImpl as _;
     let mut reader = RangeReader::new();
     reader.read_ranges(file)?.collect()
-}
-
-/// Returns true if this platform can detect shared/reflinked extents.
-pub const fn can_detect_shared() -> bool {
-    cfg!(target_os = "linux")
 }
 
 #[cfg(test)]

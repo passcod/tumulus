@@ -80,7 +80,7 @@ fn test_regular_file_returns_single_range() {
             // No ranges should be sparse for a regular written file
             for range in &ranges {
                 assert!(
-                    !range.flags.sparse,
+                    !range.hole,
                     "Regular file should not have sparse ranges: {:?}",
                     range
                 );
@@ -168,10 +168,10 @@ fn test_sparse_file_detection() {
             // Note: some filesystems might not report the hole as sparse
             if ranges.len() >= 2 {
                 // Check if we detected the sparse hole
-                let has_sparse = ranges.iter().any(|r| r.flags.sparse);
+                let has_sparse = ranges.iter().any(|r| r.hole);
                 if has_sparse {
                     // First range should be the sparse hole
-                    assert!(ranges[0].flags.sparse, "First range should be sparse hole");
+                    assert!(ranges[0].hole, "First range should be sparse hole");
                     assert_eq!(ranges[0].offset, 0, "Sparse hole should start at 0");
                 }
             }
@@ -230,8 +230,8 @@ fn test_sparse_file_with_multiple_holes() {
             );
 
             // Count sparse vs data ranges
-            let sparse_count = ranges.iter().filter(|r| r.flags.sparse).count();
-            let data_count = ranges.iter().filter(|r| !r.flags.sparse).count();
+            let sparse_count = ranges.iter().filter(|r| r.hole).count();
+            let data_count = ranges.iter().filter(|r| !r.hole).count();
 
             eprintln!(
                 "Sparse file test: {} total ranges, {} sparse, {} data",
@@ -330,87 +330,6 @@ fn test_range_reader_with_custom_buffer_size() {
 }
 
 #[cfg(target_os = "linux")]
-mod linux_tests {
-    use super::*;
-    use std::process::Command;
-
-    /// Check if we're on a filesystem that supports reflinks (btrfs, xfs, etc.)
-    fn supports_reflinks() -> bool {
-        // Try to detect btrfs or xfs with reflink support
-        let temp = tempfile::tempdir().unwrap();
-        let test_file = temp.path().join("test");
-        let copy_file = temp.path().join("copy");
-
-        // Create a test file
-        fs::write(&test_file, b"test content").unwrap();
-
-        // Try to create a reflink copy
-        let result = Command::new("cp")
-            .args([
-                "--reflink=always",
-                test_file.to_str().unwrap(),
-                copy_file.to_str().unwrap(),
-            ])
-            .output();
-
-        match result {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        }
-    }
-
-    #[test]
-    fn shared_extent_detection() {
-        if !supports_reflinks() {
-            eprintln!("Skipping: filesystem doesn't support reflinks");
-            return;
-        }
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let original = temp_dir.path().join("original");
-        let reflink = temp_dir.path().join("reflink");
-
-        // Create original file with some content
-        let content = vec![0xABu8; 64 * 1024]; // 64KB
-        fs::write(&original, &content).unwrap();
-
-        // Create a reflink copy
-        let result = Command::new("cp")
-            .args([
-                "--reflink=always",
-                original.to_str().unwrap(),
-                reflink.to_str().unwrap(),
-            ])
-            .output()
-            .unwrap();
-
-        if !result.status.success() {
-            eprintln!("Skipping: failed to create reflink");
-            return;
-        }
-
-        // Check if the original file shows shared extents
-        let file = File::open(&original).unwrap();
-        match ranges_for_file(&file) {
-            Ok(ranges) => {
-                let has_shared = ranges.iter().any(|r| r.flags.shared);
-                eprintln!(
-                    "Reflink test: {} ranges, shared detected: {}",
-                    ranges.len(),
-                    has_shared
-                );
-                // Note: shared detection depends on filesystem and kernel support
-                // We just verify we can read the file without error
-            }
-            Err(e) if is_unsupported_error(&e) => {
-                eprintln!("Skipping: filesystem doesn't support FIEMAP");
-            }
-            Err(e) => panic!("Unexpected error: {e}"),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
 mod fallback_tests {
     use super::*;
 
@@ -457,14 +376,7 @@ mod fallback_tests {
             content.len() as u64,
             "Range length should match file size"
         );
-        assert!(
-            !range.flags.sparse,
-            "Fallback range should not be marked sparse"
-        );
-        assert!(
-            !range.flags.shared,
-            "Fallback range should not be marked shared"
-        );
+        assert!(!range.hole, "Fallback range should not be marked sparse");
     }
 
     /// Test that the fallback works correctly for empty files on tmpfs.
@@ -526,48 +438,5 @@ mod fallback_tests {
         let ranges2: Vec<_> = result2.unwrap().filter_map(|r| r.ok()).collect();
         assert_eq!(ranges2.len(), 1);
         assert_eq!(ranges2[0].length, 11); // "Second file"
-    }
-}
-
-#[test]
-fn test_closed_file_handle() {
-    // This test verifies behavior with an invalid file state
-    // Note: behavior is platform-specific
-    let temp = tempfile::NamedTempFile::new().unwrap();
-    let path = temp.path().to_owned();
-
-    // Keep the path but drop the temp file (deletes it)
-    drop(temp);
-
-    // Try to open the now-deleted file
-    let result = File::open(&path);
-    assert!(result.is_err(), "Opening deleted file should fail");
-}
-
-#[test]
-fn test_directory_handling() {
-    let temp_dir = tempfile::tempdir().unwrap();
-
-    // On Windows, opening a directory with File::open() fails with "Access is denied"
-    // This is expected behavior - Windows requires special flags to open directories
-    let dir = match File::open(temp_dir.path()) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-            // Expected on Windows
-            eprintln!("Skipping: cannot open directory as file on this platform");
-            return;
-        }
-        Err(e) => panic!("Unexpected error opening directory: {e}"),
-    };
-
-    // Trying to get ranges for a directory should fail or return empty
-    match ranges_for_file(&dir) {
-        Ok(ranges) => {
-            // Some platforms might return empty ranges for directories
-            eprintln!("Directory returned {} ranges", ranges.len());
-        }
-        Err(_) => {
-            // Expected on most platforms
-        }
     }
 }

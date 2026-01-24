@@ -4,10 +4,13 @@
 //! - POST /catalog - Initiate upload with catalog ID + checksum
 //! - PUT /catalog/:id - Upload catalog data
 //! - POST /catalog/:id - Finalize upload, check for missing extents
+//! - POST /catalogs/check - Batch check which catalogs exist
+//! - PUT /catalog/:id/patch - Upload a binary patch against a reference catalog
 
 use std::io::{BufReader, Write};
 use std::sync::Arc;
 
+use axum::extract::Query;
 use axum::{
     Json, Router,
     body::Bytes,
@@ -67,12 +70,39 @@ pub struct FinalizeResponse {
     pub missing_extents: Option<Vec<String>>,
 }
 
+/// Request body for batch checking catalog existence.
+#[derive(Debug, Deserialize)]
+pub struct CheckCatalogsRequest {
+    /// List of catalog IDs to check (UUID strings)
+    pub ids: Vec<String>,
+}
+
+/// Response for batch catalog existence check.
+/// Returns catalog IDs sorted by preference (best choice first).
+/// The server decides the sorting algorithm (currently by creation time, newest first).
+#[derive(Debug, Serialize)]
+pub struct CheckCatalogsResponse {
+    /// List of catalog IDs that exist on the server, sorted by preference (best first)
+    pub existing: Vec<String>,
+}
+
+/// Query parameters for patch upload.
+#[derive(Debug, Deserialize)]
+pub struct PatchUploadParams {
+    /// The reference catalog ID to apply the patch against
+    pub reference: String,
+    /// BLAKE3 checksum of the resulting catalog (hex-encoded)
+    pub checksum: String,
+}
+
 pub fn router<S: Storage>() -> Router<AppState<S>> {
     Router::new()
         .route("/", get(list_catalogs))
         .route("/", post(initiate_upload))
+        .route("/check", post(check_catalogs))
         .route("/{id}", put(upload_catalog))
         .route("/{id}", post(finalize_upload))
+        .route("/{id}/patch", put(upload_catalog_patch))
 }
 
 /// GET /catalogs - List all complete catalogs
@@ -82,6 +112,40 @@ async fn list_catalogs<S: Storage>(
     let ids = state.storage.list_catalogs().await?;
     let ids: Vec<String> = ids.iter().map(|id| id.simple().to_string()).collect();
     Ok(Json(ids))
+}
+
+/// POST /catalogs/check - Batch check which catalogs exist
+///
+/// Returns the subset of requested catalog IDs that exist on the server,
+/// sorted by preference (best choice for use as a reference first).
+/// Currently sorts by creation time (newest first).
+async fn check_catalogs<S: Storage>(
+    State(state): State<AppState<S>>,
+    Json(req): Json<CheckCatalogsRequest>,
+) -> Result<impl IntoResponse, CatalogError> {
+    let mut existing: Vec<(String, i64)> = Vec::new();
+
+    let db = state.db.lock().unwrap();
+    for id_str in &req.ids {
+        let catalog_id = match Uuid::parse_str(id_str) {
+            Ok(id) => id,
+            Err(_) => continue, // Skip invalid UUIDs
+        };
+
+        if let Some(info) = db.get_catalog(catalog_id)? {
+            // Only include complete catalogs
+            if info.status == CatalogStatus::Complete {
+                existing.push((catalog_id.simple().to_string(), info.created_at));
+            }
+        }
+    }
+
+    // Sort by creation time, newest first (best reference choice)
+    existing.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let existing: Vec<String> = existing.into_iter().map(|(id, _)| id).collect();
+
+    Ok(Json(CheckCatalogsResponse { existing }))
 }
 
 /// Result of checking catalog state in the database
@@ -243,67 +307,10 @@ async fn upload_catalog<S: Storage>(
                 .await
                 .map_err(CatalogError::Storage)?;
 
-            // Create a streaming catalog reader to avoid loading everything into memory
-            let catalog_reader = CatalogReader::new(&body)?;
-
-            // Extract extent IDs (we need all of them for the batch existence check)
-            let extent_ids = catalog_reader.extent_ids()?;
-            let blob_count = catalog_reader.blob_count()?;
-
-            info!(
-                catalog_id = %catalog_id,
-                extent_count = extent_ids.len(),
-                blob_count = blob_count,
-                "Parsed catalog contents"
-            );
-
-            // Process blob layouts in batches to avoid loading all into memory
-            const BLOB_BATCH_SIZE: usize = 1000;
-
-            let mut batch_iter = catalog_reader.blob_batches(BLOB_BATCH_SIZE);
-            while let Some(batch_result) = batch_iter.next_batch()? {
-                // Process each batch asynchronously
-                for (blob_id, layout) in batch_result {
-                    let encoded = layout.encode();
-                    match state.storage.put_blob(&blob_id, encoded).await {
-                        Ok(created) => {
-                            if created {
-                                debug!(blob_id = %hex::encode(blob_id), "Stored new blob layout");
-                            }
-                        }
-                        Err(e) => {
-                            warn!(blob_id = %hex::encode(blob_id), error = %e, "Failed to store blob layout");
-                        }
-                    }
-                }
-            }
-
-            // Batch check which extents already exist
-            let exists = state
-                .storage
-                .extents_exist(&extent_ids)
-                .await
-                .map_err(CatalogError::Storage)?;
-
-            // Filter to only missing extents
-            let missing_extents: Vec<B3Id> = extent_ids
-                .into_iter()
-                .zip(exists.iter())
-                .filter_map(|(id, &exists)| if exists { None } else { Some(id) })
-                .collect();
-
-            info!(
-                catalog_id = %catalog_id,
-                missing_count = missing_extents.len(),
-                "Identified missing extents"
-            );
-
-            // Store the missing extents in the database (sync, no await)
-            {
-                let db = state.db.lock().unwrap();
-                db.set_catalog_extents(catalog_id, &missing_extents)?;
-                db.update_status(catalog_id, CatalogStatus::Uploading)?;
-            }
+            // Process catalog contents and get missing extents
+            let missing_extents =
+                process_catalog_contents(&state, catalog_id, &body, "Parsed catalog contents")
+                    .await?;
 
             let missing_hex: Vec<String> = missing_extents.iter().map(hex::encode).collect();
 
@@ -311,6 +318,195 @@ async fn upload_catalog<S: Storage>(
                 missing_extents: missing_hex,
             }))
         }
+    }
+}
+
+/// Process catalog contents: extract blobs and extents, store blobs, identify missing extents.
+/// This is shared between regular upload and patch upload.
+async fn process_catalog_contents<S: Storage>(
+    state: &AppState<S>,
+    catalog_id: Uuid,
+    catalog_data: &[u8],
+    log_message: &str,
+) -> Result<Vec<B3Id>, CatalogError> {
+    // Create a streaming catalog reader to avoid loading everything into memory
+    let catalog_reader = CatalogReader::new(catalog_data)?;
+
+    // Extract extent IDs (we need all of them for the batch existence check)
+    let extent_ids = catalog_reader.extent_ids()?;
+    let blob_count = catalog_reader.blob_count()?;
+
+    info!(
+        catalog_id = %catalog_id,
+        extent_count = extent_ids.len(),
+        blob_count = blob_count,
+        log_message
+    );
+
+    // Process blob layouts in batches to avoid loading all into memory
+    const BLOB_BATCH_SIZE: usize = 1000;
+
+    let mut batch_iter = catalog_reader.blob_batches(BLOB_BATCH_SIZE);
+    while let Some(batch_result) = batch_iter.next_batch()? {
+        // Process each batch asynchronously
+        for (blob_id, layout) in batch_result {
+            let encoded = layout.encode();
+            match state.storage.put_blob(&blob_id, encoded).await {
+                Ok(created) => {
+                    if created {
+                        debug!(blob_id = %hex::encode(blob_id), "Stored new blob layout");
+                    }
+                }
+                Err(e) => {
+                    warn!(blob_id = %hex::encode(blob_id), error = %e, "Failed to store blob layout");
+                }
+            }
+        }
+    }
+
+    // Batch check which extents already exist
+    let exists = state
+        .storage
+        .extents_exist(&extent_ids)
+        .await
+        .map_err(CatalogError::Storage)?;
+
+    // Filter to only missing extents
+    let missing_extents: Vec<B3Id> = extent_ids
+        .into_iter()
+        .zip(exists.iter())
+        .filter_map(|(id, &exists)| if exists { None } else { Some(id) })
+        .collect();
+
+    info!(
+        catalog_id = %catalog_id,
+        missing_count = missing_extents.len(),
+        "Identified missing extents"
+    );
+
+    // Store the missing extents in the database (sync, no await)
+    {
+        let db = state.db.lock().unwrap();
+        db.set_catalog_extents(catalog_id, &missing_extents)?;
+        db.update_status(catalog_id, CatalogStatus::Uploading)?;
+    }
+
+    Ok(missing_extents)
+}
+
+/// PUT /catalog/:id/patch - Upload catalog as a binary patch against a reference
+///
+/// Receives a compressed binary patch, applies it to the reference catalog,
+/// verifies the checksum, and proceeds with normal catalog processing.
+async fn upload_catalog_patch<S: Storage>(
+    State(state): State<AppState<S>>,
+    Path(id): Path<String>,
+    Query(params): Query<PatchUploadParams>,
+    body: Bytes,
+) -> Result<impl IntoResponse, CatalogError> {
+    let catalog_id = parse_uuid(&id)?;
+    let reference_id = parse_uuid(&params.reference)?;
+    let expected_checksum = parse_checksum(&params.checksum)?;
+
+    info!(
+        catalog_id = %catalog_id,
+        reference_id = %reference_id,
+        patch_size = body.len(),
+        "Received catalog patch upload"
+    );
+
+    // Get the reference catalog from storage
+    let reference_data = state
+        .storage
+        .get_catalog(reference_id)
+        .await
+        .map_err(|e| match e {
+            StorageError::NotFound => CatalogError::NotFound(reference_id),
+            other => CatalogError::Storage(other),
+        })?;
+
+    // Decompress the patch data (it should be zstd-compressed)
+    let patch_data = decompress_if_needed(&body)?;
+
+    // Decompress reference catalog if needed
+    let reference_decompressed = decompress_if_needed(&reference_data)?;
+
+    // Apply the patch to get the target catalog
+    let mut target_decompressed = Vec::new();
+    qbsdiff::Bspatch::new(&patch_data)
+        .map_err(|e| CatalogError::InvalidCatalog(format!("Invalid patch data: {}", e)))?
+        .apply(
+            &reference_decompressed,
+            std::io::Cursor::new(&mut target_decompressed),
+        )
+        .map_err(|e| CatalogError::InvalidCatalog(format!("Failed to apply patch: {}", e)))?;
+
+    // Verify the checksum of the reconstructed catalog
+    let actual_checksum = blake3::hash(&target_decompressed);
+    if actual_checksum != expected_checksum.0 {
+        return Err(CatalogError::ChecksumMismatch {
+            expected: hex::encode(expected_checksum),
+            actual: actual_checksum.to_hex().to_string(),
+        });
+    }
+
+    info!(
+        catalog_id = %catalog_id,
+        reconstructed_size = target_decompressed.len(),
+        "Successfully applied patch and verified checksum"
+    );
+
+    // Compress the reconstructed catalog for storage
+    let mut compressed = Vec::new();
+    {
+        let mut encoder =
+            zstd::stream::Encoder::new(&mut compressed, 19).map_err(CatalogError::Io)?;
+        std::io::Write::write_all(&mut encoder, &target_decompressed).map_err(CatalogError::Io)?;
+        encoder.finish().map_err(CatalogError::Io)?;
+    }
+
+    // Create the catalog entry if it doesn't exist
+    {
+        let db = state.db.lock().unwrap();
+        if db.get_catalog(catalog_id)?.is_none() {
+            db.create_catalog(catalog_id, &expected_checksum)?;
+        }
+    }
+
+    // Store the catalog
+    let catalog_bytes = Bytes::from(compressed);
+    state
+        .storage
+        .put_catalog(catalog_id, catalog_bytes)
+        .await
+        .map_err(CatalogError::Storage)?;
+
+    // Process catalog contents using shared logic
+    let missing_extents = process_catalog_contents(
+        &state,
+        catalog_id,
+        &target_decompressed,
+        "Parsed reconstructed catalog contents",
+    )
+    .await?;
+
+    let missing_hex: Vec<String> = missing_extents.iter().map(hex::encode).collect();
+
+    Ok(Json(UploadResponse {
+        missing_extents: missing_hex,
+    }))
+}
+
+/// Decompress data if it's zstd-compressed, otherwise return as-is.
+fn decompress_if_needed(data: &[u8]) -> Result<Vec<u8>, CatalogError> {
+    if data.len() >= 4 && data[0..4] == [0x28, 0xB5, 0x2F, 0xFD] {
+        let reader = BufReader::new(data);
+        let mut decoder = zstd::stream::Decoder::new(reader).map_err(CatalogError::Io)?;
+        let mut decompressed = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decompressed).map_err(CatalogError::Io)?;
+        Ok(decompressed)
+    } else {
+        Ok(data.to_vec())
     }
 }
 

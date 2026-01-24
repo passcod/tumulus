@@ -140,8 +140,6 @@ impl Iterator for FiemapRangeIter<'_> {
     type Item = io::Result<DataRange>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use crate::types::RangeFlags;
-
         // Return any pending range first, even if done is set
         // This handles the case where we set done=true while storing a pending range
         if let Some(range) = self.pending_range.take() {
@@ -156,10 +154,8 @@ impl Iterator for FiemapRangeIter<'_> {
             Some(Ok(extent)) => {
                 // Check for sparse hole before this extent
                 if extent.logical_offset > self.current_pos {
-                    let hole = DataRange::sparse(
-                        self.current_pos,
-                        extent.logical_offset - self.current_pos,
-                    );
+                    let hole =
+                        DataRange::hole(self.current_pos, extent.logical_offset - self.current_pos);
 
                     // Store the data range to return next iteration
                     // Clamp length to not exceed file size (extents can extend beyond
@@ -169,14 +165,7 @@ impl Iterator for FiemapRangeIter<'_> {
                     } else {
                         extent.length
                     };
-                    let range = DataRange {
-                        offset: extent.logical_offset,
-                        length: clamped_length,
-                        flags: RangeFlags {
-                            sparse: false,
-                            shared: extent.shared(),
-                        },
-                    };
+                    let range = DataRange::new(extent.logical_offset, clamped_length);
                     self.current_pos = extent.logical_offset + extent.length;
 
                     if extent.last() && self.current_pos >= self.file_size {
@@ -195,14 +184,7 @@ impl Iterator for FiemapRangeIter<'_> {
                 } else {
                     extent.length
                 };
-                let range = DataRange {
-                    offset: extent.logical_offset,
-                    length: clamped_length,
-                    flags: RangeFlags {
-                        sparse: false,
-                        shared: extent.shared(),
-                    },
-                };
+                let range = DataRange::new(extent.logical_offset, clamped_length);
                 self.current_pos = extent.logical_offset + extent.length;
 
                 if extent.last() && self.current_pos >= self.file_size {
@@ -215,8 +197,7 @@ impl Iterator for FiemapRangeIter<'_> {
             None => {
                 // Check for trailing sparse hole
                 if self.current_pos < self.file_size {
-                    let hole =
-                        DataRange::sparse(self.current_pos, self.file_size - self.current_pos);
+                    let hole = DataRange::hole(self.current_pos, self.file_size - self.current_pos);
                     self.current_pos = self.file_size;
                     self.done = true;
                     return Some(Ok(hole));

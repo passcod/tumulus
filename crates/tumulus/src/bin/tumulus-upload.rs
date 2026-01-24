@@ -2,13 +2,21 @@
 //!
 //! This binary takes a catalog file, verifies it matches the local machine,
 //! and uploads it to a tumulus server.
+//!
+//! Supports delta uploads using `--reference` to specify previous catalog files.
+//! When references are provided and the server knows one of them, a binary patch
+//! is generated and uploaded instead of the full catalog.
 
-use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use clap::Parser;
 use lloggs::LoggingArgs;
@@ -19,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use tumulus::open_catalog;
+use tumulus::{decompress_file, is_zstd_compressed, open_catalog};
 
 #[derive(Parser)]
 #[command(name = "tumulus-upload")]
@@ -43,6 +51,13 @@ struct Args {
     /// Number of parallel upload threads (default: 32)
     #[arg(long, short = 'j', default_value = "32")]
     parallel: usize,
+
+    /// Reference catalogs to use for delta uploads.
+    /// When provided, the tool will check if the server knows any of these catalogs
+    /// and use the most recent one to generate a binary patch instead of uploading
+    /// the full catalog.
+    #[arg(long, short = 'r')]
+    reference: Vec<PathBuf>,
 
     #[command(flatten)]
     logging: LoggingArgs,
@@ -68,6 +83,26 @@ struct InitiateResponse {
 #[derive(Debug, Deserialize)]
 struct UploadResponse {
     missing_extents: Vec<String>,
+}
+
+/// Request body for checking catalog existence.
+#[derive(Debug, Serialize)]
+struct CheckCatalogsRequest {
+    ids: Vec<String>,
+}
+
+/// Response from checking catalog existence.
+/// Returns catalog IDs sorted by preference (best choice first).
+#[derive(Debug, Deserialize)]
+struct CheckCatalogsResponse {
+    existing: Vec<String>,
+}
+
+/// Metadata about a reference catalog on disk.
+#[derive(Debug, Clone)]
+struct ReferenceCatalogInfo {
+    path: PathBuf,
+    id: Uuid,
 }
 
 /// Response from finalizing a catalog.
@@ -137,6 +172,12 @@ enum UploadError {
 
     #[error("File not found for extent {extent_id}: {path}")]
     FileNotFound { extent_id: String, path: PathBuf },
+
+    #[error("Failed to read reference catalog: {0}")]
+    ReferenceCatalog(String),
+
+    #[error("Binary diff error: {0}")]
+    BinaryDiff(String),
 }
 
 /// Metadata extracted from the catalog.
@@ -281,14 +322,37 @@ fn run(args: Args) -> Result<(), UploadError> {
         );
         initiate_resp.missing_extents.unwrap_or_default()
     } else {
-        // Step 2: Upload the catalog data
-        info!("Uploading catalog data");
-        let upload_resp = upload_catalog(&client, server_url, server_id, &catalog_data)?;
-        info!(
-            missing_count = upload_resp.missing_extents.len(),
-            "Catalog uploaded"
-        );
-        upload_resp.missing_extents
+        // Check if we should try delta upload with reference catalogs
+        let delta_result = if !args.reference.is_empty() {
+            try_delta_upload(
+                &client,
+                server_url,
+                server_id,
+                &checksum_hex,
+                &args.catalog,
+                &args.reference,
+            )?
+        } else {
+            None
+        };
+
+        if let Some(upload_resp) = delta_result {
+            // Delta upload succeeded
+            info!(
+                missing_count = upload_resp.missing_extents.len(),
+                "Catalog uploaded via delta patch"
+            );
+            upload_resp.missing_extents
+        } else {
+            // Step 2: Upload the catalog data (full upload)
+            info!("Uploading catalog data");
+            let upload_resp = upload_catalog(&client, server_url, server_id, &catalog_data)?;
+            info!(
+                missing_count = upload_resp.missing_extents.len(),
+                "Catalog uploaded"
+            );
+            upload_resp.missing_extents
+        }
     };
 
     // Step 3 & 4: Upload extents and finalize in a loop until complete
@@ -356,6 +420,181 @@ fn run(args: Args) -> Result<(), UploadError> {
 
     info!(catalog_id = %server_id, "Upload complete!");
     Ok(())
+}
+
+/// Try to upload the catalog using a delta patch against a reference catalog.
+/// Returns Some(UploadResponse) if successful, None if no suitable reference was found.
+fn try_delta_upload(
+    client: &Client,
+    server_url: &str,
+    catalog_id: Uuid,
+    checksum_hex: &str,
+    target_catalog: &Path,
+    reference_paths: &[PathBuf],
+) -> Result<Option<UploadResponse>, UploadError> {
+    // Read metadata from each reference catalog
+    let mut reference_infos = Vec::new();
+    for path in reference_paths {
+        match read_reference_catalog_info(path) {
+            Ok(info) => {
+                debug!(path = ?path, id = %info.id, "Found reference catalog");
+                reference_infos.push(info);
+            }
+            Err(e) => {
+                warn!(path = ?path, error = %e, "Failed to read reference catalog, skipping");
+            }
+        }
+    }
+
+    if reference_infos.is_empty() {
+        info!("No valid reference catalogs found, falling back to full upload");
+        return Ok(None);
+    }
+
+    // Ask the server which of these catalogs it knows about
+    let check_req = CheckCatalogsRequest {
+        ids: reference_infos
+            .iter()
+            .map(|r| r.id.simple().to_string())
+            .collect(),
+    };
+
+    let url = format!("{}/catalogs/check", server_url);
+    let resp = client.post(&url).json(&check_req).send()?;
+
+    if !resp.status().is_success() {
+        warn!("Server doesn't support catalog check endpoint, falling back to full upload");
+        return Ok(None);
+    }
+
+    let check_resp: CheckCatalogsResponse = resp.json()?;
+
+    if check_resp.existing.is_empty() {
+        info!("Server doesn't have any of the reference catalogs, falling back to full upload");
+        return Ok(None);
+    }
+
+    // Server returns IDs sorted by preference (best first), so use the first one we have locally
+    let best_reference = check_resp.existing.iter().find_map(|server_id| {
+        reference_infos
+            .iter()
+            .find(|r| r.id.simple().to_string().to_lowercase() == server_id.to_lowercase())
+    });
+
+    let best_reference = match best_reference {
+        Some(r) => r,
+        None => {
+            info!("No matching reference catalog found on server, falling back to full upload");
+            return Ok(None);
+        }
+    };
+
+    info!(
+        reference_id = %best_reference.id,
+        reference_path = ?best_reference.path,
+        "Using reference catalog for delta upload"
+    );
+
+    // Decompress both catalogs to get raw SQLite data
+    let target_data = decompress_catalog_data(target_catalog)?;
+    let reference_data = decompress_catalog_data(&best_reference.path)?;
+
+    info!(
+        target_size = target_data.len(),
+        reference_size = reference_data.len(),
+        "Decompressed catalogs for diff"
+    );
+
+    // Generate binary diff using qbsdiff
+    let mut patch_data = Vec::new();
+    qbsdiff::Bsdiff::new(&reference_data, &target_data)
+        .compare(&mut patch_data)
+        .map_err(|e| UploadError::BinaryDiff(format!("Failed to generate diff: {}", e)))?;
+
+    info!(patch_size = patch_data.len(), "Generated binary patch");
+
+    // Compress the patch
+    let mut compressed_patch = Vec::new();
+    {
+        let mut encoder =
+            zstd::stream::Encoder::new(&mut compressed_patch, 19).map_err(UploadError::Io)?;
+        encoder.write_all(&patch_data).map_err(UploadError::Io)?;
+        encoder.finish().map_err(UploadError::Io)?;
+    }
+
+    info!(
+        compressed_patch_size = compressed_patch.len(),
+        compression_ratio = format!(
+            "{:.1}%",
+            (compressed_patch.len() as f64 / patch_data.len() as f64) * 100.0
+        ),
+        "Compressed patch"
+    );
+
+    // Upload via patch endpoint
+    let url = format!(
+        "{}/catalogs/{}/patch?reference={}&checksum={}",
+        server_url,
+        catalog_id.simple(),
+        best_reference.id.simple(),
+        checksum_hex
+    );
+
+    let resp = client
+        .put(&url)
+        .header("Content-Type", "application/octet-stream")
+        .body(compressed_patch)
+        .send()?;
+
+    if !resp.status().is_success() {
+        let error_resp: ErrorResponse = resp.json()?;
+        return Err(UploadError::Server {
+            error: error_resp.error,
+            detail: error_resp.detail,
+        });
+    }
+
+    let upload_resp: UploadResponse = resp.json()?;
+    Ok(Some(upload_resp))
+}
+
+/// Read metadata from a reference catalog file.
+fn read_reference_catalog_info(path: &Path) -> Result<ReferenceCatalogInfo, UploadError> {
+    let (conn, _tempfile) = open_catalog(path).map_err(|e| {
+        UploadError::ReferenceCatalog(format!("Failed to open {}: {}", path.display(), e))
+    })?;
+
+    // Read catalog ID
+    let id_str: String = conn
+        .query_row("SELECT value FROM metadata WHERE key = 'id'", [], |row| {
+            row.get(0)
+        })
+        .map_err(|_| UploadError::ReferenceCatalog(format!("Missing id in {}", path.display())))?;
+
+    let id_str: String = serde_json::from_str(&id_str)
+        .map_err(|_| UploadError::ReferenceCatalog(format!("Invalid id in {}", path.display())))?;
+
+    let id = Uuid::parse_str(&id_str).map_err(|_| {
+        UploadError::ReferenceCatalog(format!("Invalid UUID in {}", path.display()))
+    })?;
+
+    Ok(ReferenceCatalogInfo {
+        path: path.to_path_buf(),
+        id,
+    })
+}
+
+/// Decompress a catalog file and return the raw SQLite data.
+fn decompress_catalog_data(path: &Path) -> Result<Vec<u8>, UploadError> {
+    if is_zstd_compressed(path)? {
+        // Decompress to a temp file and read it
+        let temp_file = tempfile::NamedTempFile::new()?;
+        decompress_file(path, temp_file.path())?;
+        Ok(fs::read(temp_file.path())?)
+    } else {
+        // Already uncompressed
+        Ok(fs::read(path)?)
+    }
 }
 
 fn read_catalog_metadata(conn: &Connection) -> Result<CatalogMetadata, UploadError> {

@@ -14,10 +14,7 @@ pub const MAX_EXTENT_SIZE: u64 = 128 * 1024;
 #[derive(Debug, Clone)]
 pub struct ExtentInfo {
     pub extent_id: [u8; 32],
-    pub offset: u64,
-    pub bytes: u64,
-    pub is_sparse: bool,
-    pub is_shared: bool,
+    pub range: DataRange,
     /// Filesystem extent index - incremented for each new filesystem extent.
     /// Multiple ExtentInfo entries with the same fs_extent value are subchunks
     /// of the same underlying filesystem extent.
@@ -32,79 +29,16 @@ pub struct BlobInfo {
     pub extents: Vec<ExtentInfo>,
 }
 
-/// Detect sparse holes by finding gaps between extents.
-///
-/// Takes a list of (logical_offset, length, extent_id) tuples and the total file size,
-/// and returns a complete list of ExtentInfo including sparse holes.
-pub fn detect_sparse_holes(extents: &[(u64, u64, [u8; 32])], file_size: u64) -> Vec<ExtentInfo> {
-    let mut result = Vec::new();
-    let mut current_pos: u64 = 0;
-
-    for (logical_offset, length, extent_id) in extents {
-        // If there's a gap before this extent, it's a sparse hole
-        if *logical_offset > current_pos {
-            let hole_size = logical_offset - current_pos;
-            debug!(
-                offset = current_pos,
-                size = hole_size,
-                "Detected sparse hole"
-            );
-            result.push(ExtentInfo {
-                extent_id: [0u8; 32], // Sparse extents have no ID
-                offset: current_pos,
-                bytes: hole_size,
-                is_sparse: true,
-                is_shared: false,
-                fs_extent: 0, // Legacy function, fs_extent not tracked
-            });
-        }
-
-        result.push(ExtentInfo {
-            extent_id: *extent_id,
-            offset: *logical_offset,
-            bytes: *length,
-            is_sparse: false,
-            is_shared: false,
-            fs_extent: 0, // Legacy function, fs_extent not tracked
-        });
-
-        current_pos = logical_offset + length;
-    }
-
-    // Check for trailing sparse hole
-    if current_pos < file_size {
-        let hole_size = file_size - current_pos;
-        debug!(
-            offset = current_pos,
-            size = hole_size,
-            "Detected trailing sparse hole"
-        );
-        result.push(ExtentInfo {
-            extent_id: [0u8; 32],
-            offset: current_pos,
-            bytes: hole_size,
-            is_sparse: true,
-            is_shared: false,
-            fs_extent: 0, // Legacy function, fs_extent not tracked
-        });
-    }
-
-    result
-}
-
 /// Convert a DataRange to one or more ExtentInfo entries, subchunking large extents.
 ///
 /// If the extent is larger than MAX_EXTENT_SIZE, it will be split into multiple
 /// chunks, each with its own hash. All chunks share the same fs_extent value.
-fn range_to_extent_infos(range: &DataRange, mmap: &Mmap, fs_extent: u32) -> Vec<ExtentInfo> {
-    if range.flags.sparse {
-        // Sparse holes are not subchunked - they represent gaps in the file
+fn range_to_extent_infos(range: DataRange, mmap: &Mmap, fs_extent: u32) -> Vec<ExtentInfo> {
+    if range.hole {
+        // Sparse holes are not subchunked
         return vec![ExtentInfo {
             extent_id: [0u8; 32],
-            offset: range.offset,
-            bytes: range.length,
-            is_sparse: true,
-            is_shared: false,
+            range,
             fs_extent,
         }];
     }
@@ -124,10 +58,7 @@ fn range_to_extent_infos(range: &DataRange, mmap: &Mmap, fs_extent: u32) -> Vec<
 
         return vec![ExtentInfo {
             extent_id,
-            offset: range.offset,
-            bytes: total_len,
-            is_sparse: false,
-            is_shared: range.flags.shared,
+            range: DataRange::new(range.offset, total_len),
             fs_extent,
         }];
     }
@@ -153,10 +84,7 @@ fn range_to_extent_infos(range: &DataRange, mmap: &Mmap, fs_extent: u32) -> Vec<
 
         chunks.push(ExtentInfo {
             extent_id,
-            offset: chunk_offset,
-            bytes: chunk_len,
-            is_sparse: false,
-            is_shared: range.flags.shared,
+            range: DataRange::new(chunk_offset, chunk_len),
             fs_extent,
         });
 
@@ -195,7 +123,7 @@ pub fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
         // No extents reported, treat whole file as one extent
         // Still apply subchunking if file is large
         let single_range = DataRange::new(0, file_len);
-        let extents = range_to_extent_infos(&single_range, &mmap, 1);
+        let extents = range_to_extent_infos(single_range, &mmap, 1);
 
         let mut blob_hasher = Hasher::new();
         blob_hasher.update(&mmap[..]);
@@ -213,7 +141,7 @@ pub fn process_file_extents(path: &Path) -> io::Result<Option<BlobInfo>> {
     let mut extents: Vec<ExtentInfo> = Vec::new();
     let mut fs_extent_idx: u32 = 0;
 
-    for range in &ranges {
+    for range in ranges {
         fs_extent_idx += 1;
         let chunk_infos = range_to_extent_infos(range, &mmap, fs_extent_idx);
         extents.extend(chunk_infos);
@@ -260,7 +188,7 @@ pub fn process_file_extents_with_reader(
         // No extents reported, treat whole file as one extent
         // Still apply subchunking if file is large
         let single_range = DataRange::new(0, file_len);
-        let extents = range_to_extent_infos(&single_range, &mmap, 1);
+        let extents = range_to_extent_infos(single_range, &mmap, 1);
 
         let mut blob_hasher = Hasher::new();
         blob_hasher.update(&mmap[..]);
@@ -278,7 +206,7 @@ pub fn process_file_extents_with_reader(
     let mut extents: Vec<ExtentInfo> = Vec::new();
     let mut fs_extent_idx: u32 = 0;
 
-    for range in &ranges {
+    for range in ranges {
         fs_extent_idx += 1;
         let chunk_infos = range_to_extent_infos(range, &mmap, fs_extent_idx);
         extents.extend(chunk_infos);

@@ -1,7 +1,7 @@
 use std::{fs::File, io, path::PathBuf};
 
 use clap::Parser;
-use extentria::{DataRange, RangeReader, RangeReaderImpl, can_detect_shared};
+use extentria::{DataRange, RangeReader, RangeReaderImpl};
 use lloggs::LoggingArgs;
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -76,7 +76,7 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
     match ranges {
         Ok(range_list) => {
             for range in range_list {
-                if range.flags.sparse {
+                if range.hole {
                     extent_displays.push(ExtentDisplay {
                         logical_offset: range.offset,
                         length: range.length,
@@ -91,16 +91,10 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
                     let slice = &mmap[start..end];
                     let extent_id = blake3::hash(slice);
 
-                    let mut flags = Vec::new();
-                    if range.flags.shared {
-                        flags.push("shared");
-                    }
-                    let flags_str = flags.join(",");
-
                     extent_displays.push(ExtentDisplay {
                         logical_offset: range.offset,
                         length: (end - start) as u64,
-                        flags: flags_str,
+                        flags: String::new(),
                         is_sparse: false,
                         hash: Some(hex::encode(extent_id.as_bytes())),
                         bytes_read: end - start,
@@ -147,12 +141,6 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     })?;
 
     info!(files = args.paths.len(), "Starting extent analysis");
-
-    if can_detect_shared() {
-        debug!("Platform supports shared extent detection");
-    } else {
-        debug!("Platform does not support shared extent detection");
-    }
 
     // Process all files in parallel
     let results: Vec<_> = args

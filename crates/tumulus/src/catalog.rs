@@ -116,7 +116,9 @@ pub fn write_catalog(conn: &Connection, file_infos: &[FileInfo]) -> rusqlite::Re
                 // Deduplicate extents by offset within this blob
                 let mut extents_by_offset: HashMap<u64, &ExtentInfo> = HashMap::new();
                 for extent in &blob.extents {
-                    extents_by_offset.entry(extent.offset).or_insert(extent);
+                    extents_by_offset
+                        .entry(extent.range.offset)
+                        .or_insert(extent);
                 }
                 extents_by_offset.into_values().collect()
             });
@@ -152,9 +154,11 @@ pub fn write_catalog(conn: &Connection, file_infos: &[FileInfo]) -> rusqlite::Re
 
             // Insert extents (skip sparse holes - they have no extent_id)
             for extent in extents {
-                if !extent.is_sparse {
-                    extent_stmt
-                        .execute(params![extent.extent_id.as_slice(), extent.bytes as i64])?;
+                if !extent.range.hole {
+                    extent_stmt.execute(params![
+                        extent.extent_id.as_slice(),
+                        extent.range.length as i64
+                    ])?;
                 }
             }
 
@@ -167,7 +171,7 @@ pub fn write_catalog(conn: &Connection, file_infos: &[FileInfo]) -> rusqlite::Re
 
             // Insert blob_extents (include sparse holes with null extent_id)
             for extent in extents {
-                let extent_id: Option<&[u8]> = if extent.is_sparse {
+                let extent_id: Option<&[u8]> = if extent.range.hole {
                     None
                 } else {
                     Some(extent.extent_id.as_slice())
@@ -175,8 +179,8 @@ pub fn write_catalog(conn: &Connection, file_infos: &[FileInfo]) -> rusqlite::Re
                 blob_extent_stmt.execute(params![
                     blob_id.as_slice(),
                     extent_id,
-                    extent.offset as i64,
-                    extent.bytes as i64,
+                    extent.range.offset as i64,
+                    extent.range.length as i64,
                     extent.fs_extent as i64
                 ])?;
             }

@@ -1,8 +1,9 @@
-use std::fs::File;
-use std::io;
+use std::{fs::File, io};
 
-use crate::types::{RangeIter, RangeReaderImpl, private::Sealed};
-use crate::unix_seek;
+use crate::{
+    types::{RangeIter, RangeReaderImpl, private::Sealed},
+    unix_seek,
+};
 
 /// Range reader for FreeBSD using SEEK_HOLE/SEEK_DATA.
 #[derive(Debug, Default)]

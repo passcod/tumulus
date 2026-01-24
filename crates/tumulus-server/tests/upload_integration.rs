@@ -13,6 +13,7 @@ use std::sync::Arc;
 use reqwest::blocking::Client;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -55,6 +56,19 @@ struct ErrorResponse {
     error: String,
     #[serde(default)]
     detail: Option<String>,
+}
+
+/// Request for batch checking catalog existence.
+#[derive(Debug, Serialize)]
+struct CheckCatalogsRequest {
+    ids: Vec<String>,
+}
+
+/// Response from checking catalog existence.
+/// Returns catalog IDs sorted by preference (best choice first).
+#[derive(Debug, Deserialize)]
+struct CheckCatalogsResponse {
+    existing: Vec<String>,
 }
 
 /// Test server handle that manages the server lifecycle.
@@ -749,6 +763,248 @@ fn test_catalog_checksum_mismatch() {
             "Expected different ID for checksum mismatch"
         );
     }
+}
+
+#[test]
+fn test_check_catalogs_empty() {
+    let server = TestServer::start();
+    let client = Client::new();
+
+    // Check for catalogs that don't exist
+    let check_req = CheckCatalogsRequest {
+        ids: vec![
+            Uuid::new_v4().simple().to_string(),
+            Uuid::new_v4().simple().to_string(),
+        ],
+    };
+
+    let resp = client
+        .post(format!("{}/catalogs/check", server.url()))
+        .json(&check_req)
+        .send()
+        .unwrap();
+
+    assert!(resp.status().is_success());
+
+    let check_resp: CheckCatalogsResponse = resp.json().unwrap();
+    assert!(check_resp.existing.is_empty());
+}
+
+#[test]
+fn test_check_catalogs_with_existing() {
+    let server = TestServer::start();
+    let client = Client::new();
+    let fixture = TestFixture::new();
+
+    // First, upload a catalog completely
+    let catalog_data = fixture.catalog_data();
+
+    // Initiate
+    let init_req = InitiateRequest {
+        id: fixture.catalog_id,
+        checksum: fixture.catalog_checksum.clone(),
+    };
+    let resp = client
+        .post(format!("{}/catalogs", server.url()))
+        .json(&init_req)
+        .send()
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // Upload catalog
+    let resp = client
+        .put(format!(
+            "{}/catalogs/{}",
+            server.url(),
+            fixture.catalog_id.simple()
+        ))
+        .header("Content-Type", "application/octet-stream")
+        .body(catalog_data)
+        .send()
+        .unwrap();
+    assert!(resp.status().is_success());
+    let upload_resp: UploadResponse = resp.json().unwrap();
+
+    // Upload extents
+    for extent_id in &upload_resp.missing_extents {
+        let extent_data = find_extent_data(&fixture, extent_id);
+        let resp = client
+            .put(format!(
+                "{}/extents/{}",
+                server.url(),
+                extent_id.to_lowercase()
+            ))
+            .header("Content-Type", "application/octet-stream")
+            .body(extent_data)
+            .send()
+            .unwrap();
+        assert!(resp.status().is_success());
+    }
+
+    // Finalize
+    let resp = client
+        .post(format!(
+            "{}/catalogs/{}",
+            server.url(),
+            fixture.catalog_id.simple()
+        ))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204);
+
+    // Now check for this catalog plus some non-existent ones
+    let check_req = CheckCatalogsRequest {
+        ids: vec![
+            fixture.catalog_id.simple().to_string(),
+            Uuid::new_v4().simple().to_string(),
+            Uuid::new_v4().simple().to_string(),
+        ],
+    };
+
+    let resp = client
+        .post(format!("{}/catalogs/check", server.url()))
+        .json(&check_req)
+        .send()
+        .unwrap();
+
+    assert!(resp.status().is_success());
+
+    let check_resp: CheckCatalogsResponse = resp.json().unwrap();
+    assert_eq!(check_resp.existing.len(), 1);
+    assert_eq!(
+        check_resp.existing[0].to_lowercase(),
+        fixture.catalog_id.simple().to_string().to_lowercase()
+    );
+}
+
+#[test]
+fn test_patch_upload() {
+    let server = TestServer::start();
+    let client = Client::new();
+    let fixture = TestFixture::new();
+
+    // First, upload a reference catalog completely
+    let catalog_data = fixture.catalog_data();
+
+    // Initiate
+    let init_req = InitiateRequest {
+        id: fixture.catalog_id,
+        checksum: fixture.catalog_checksum.clone(),
+    };
+    let resp = client
+        .post(format!("{}/catalogs", server.url()))
+        .json(&init_req)
+        .send()
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // Upload catalog
+    let resp = client
+        .put(format!(
+            "{}/catalogs/{}",
+            server.url(),
+            fixture.catalog_id.simple()
+        ))
+        .header("Content-Type", "application/octet-stream")
+        .body(catalog_data.clone())
+        .send()
+        .unwrap();
+    assert!(resp.status().is_success());
+    let upload_resp: UploadResponse = resp.json().unwrap();
+
+    // Upload extents
+    for extent_id in &upload_resp.missing_extents {
+        let extent_data = find_extent_data(&fixture, extent_id);
+        let resp = client
+            .put(format!(
+                "{}/extents/{}",
+                server.url(),
+                extent_id.to_lowercase()
+            ))
+            .header("Content-Type", "application/octet-stream")
+            .body(extent_data)
+            .send()
+            .unwrap();
+        assert!(resp.status().is_success());
+    }
+
+    // Finalize the reference catalog
+    let resp = client
+        .post(format!(
+            "{}/catalogs/{}",
+            server.url(),
+            fixture.catalog_id.simple()
+        ))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204);
+
+    // Create a slightly different "target" catalog (just use the same data for simplicity)
+    let target_id = Uuid::new_v4();
+    let target_data = catalog_data.clone(); // In real use this would be different
+    let target_checksum = blake3::hash(&target_data).to_hex().to_string();
+
+    // Generate a binary patch from reference to target
+    let mut patch_data = Vec::new();
+    qbsdiff::Bsdiff::new(&catalog_data, &target_data)
+        .compare(&mut patch_data)
+        .expect("Failed to generate patch");
+
+    // Compress the patch
+    let mut compressed_patch = Vec::new();
+    {
+        let mut encoder = zstd::stream::Encoder::new(&mut compressed_patch, 3).unwrap();
+        encoder.write_all(&patch_data).unwrap();
+        encoder.finish().unwrap();
+    }
+
+    // Initiate the target catalog upload
+    let init_req = InitiateRequest {
+        id: target_id,
+        checksum: target_checksum.clone(),
+    };
+    let resp = client
+        .post(format!("{}/catalogs", server.url()))
+        .json(&init_req)
+        .send()
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // Upload via patch endpoint
+    let patch_url = format!(
+        "{}/catalogs/{}/patch?reference={}&checksum={}",
+        server.url(),
+        target_id.simple(),
+        fixture.catalog_id.simple(),
+        target_checksum
+    );
+
+    let resp = client
+        .put(&patch_url)
+        .header("Content-Type", "application/octet-stream")
+        .body(compressed_patch)
+        .send()
+        .unwrap();
+
+    assert!(
+        resp.status().is_success(),
+        "Patch upload failed: {:?}",
+        resp.text()
+    );
+
+    let patch_resp: UploadResponse = resp.json().unwrap();
+    // All extents should already exist from the reference upload
+    assert!(
+        patch_resp.missing_extents.is_empty(),
+        "Expected no missing extents since they were already uploaded"
+    );
+
+    // Finalize the patched catalog
+    let resp = client
+        .post(format!("{}/catalogs/{}", server.url(), target_id.simple()))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204);
 }
 
 // ============================================================================
