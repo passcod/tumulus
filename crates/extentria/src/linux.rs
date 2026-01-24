@@ -4,6 +4,7 @@ use std::os::fd::AsFd;
 
 use crate::fiemap::FiemapLookup;
 use crate::types::{DataRange, RangeIter, RangeReaderImpl, private::Sealed};
+use crate::unix_seek;
 
 /// Range reader for Linux using FIEMAP.
 #[derive(Debug)]
@@ -67,10 +68,18 @@ impl RangeReaderImpl for RangeReader {
                 done: false,
             }))),
             Err(e) if is_fiemap_unsupported(&e) => {
-                // Filesystem doesn't support FIEMAP, fall back to single extent
-                Ok(Box::new(LinuxRangeIter::Fallback(FallbackRangeIter::new(
-                    file_size,
-                ))))
+                // Filesystem doesn't support FIEMAP, try SEEK_HOLE/SEEK_DATA first
+                // to at least detect sparse holes before falling back to single extent
+                match unix_seek::read_ranges(file) {
+                    Ok(iter) => Ok(Box::new(LinuxRangeIter::SeekHole(iter))),
+                    Err(e) if is_seek_hole_unsupported(&e) => {
+                        // SEEK_HOLE/SEEK_DATA also not supported, fall back to single extent
+                        Ok(Box::new(LinuxRangeIter::Fallback(FallbackRangeIter::new(
+                            file_size,
+                        ))))
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Err(e) => Err(e),
         }
@@ -86,9 +95,18 @@ fn is_fiemap_unsupported(err: &io::Error) -> bool {
     )
 }
 
-/// Iterator that can be either FIEMAP-based or fallback.
+/// Check if an error indicates SEEK_HOLE/SEEK_DATA is not supported.
+fn is_seek_hole_unsupported(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EOPNOTSUPP) | Some(libc::EINVAL) | Some(libc::ESPIPE)
+    )
+}
+
+/// Iterator that can be FIEMAP-based, SEEK_HOLE-based, or fallback.
 enum LinuxRangeIter<'a> {
     Fiemap(FiemapRangeIter<'a>),
+    SeekHole(unix_seek::SeekRangeIter),
     Fallback(FallbackRangeIter),
 }
 
@@ -98,6 +116,7 @@ impl Iterator for LinuxRangeIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             LinuxRangeIter::Fiemap(iter) => iter.next(),
+            LinuxRangeIter::SeekHole(iter) => iter.next(),
             LinuxRangeIter::Fallback(iter) => iter.next(),
         }
     }

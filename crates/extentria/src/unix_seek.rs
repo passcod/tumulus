@@ -13,7 +13,7 @@ use crate::types::DataRange;
 ///
 /// Returns an iterator of data ranges. Sparse holes are represented as
 /// `DataRange` with `flags.sparse = true`.
-pub fn read_ranges(file: &File) -> io::Result<impl Iterator<Item = io::Result<DataRange>>> {
+pub fn read_ranges(file: &File) -> io::Result<SeekRangeIter> {
     let file_size = file.metadata()?.len();
     let fd = file.as_raw_fd();
 
@@ -25,7 +25,8 @@ pub fn read_ranges(file: &File) -> io::Result<impl Iterator<Item = io::Result<Da
     })
 }
 
-struct SeekRangeIter {
+/// Iterator over data ranges using SEEK_HOLE/SEEK_DATA.
+pub struct SeekRangeIter {
     fd: i32,
     file_size: u64,
     current_pos: u64,
@@ -79,7 +80,8 @@ impl Iterator for SeekRangeIter {
     }
 }
 
-fn seek_data(fd: i32, offset: u64) -> io::Result<u64> {
+/// Seek to the next data region at or after the given offset.
+pub fn seek_data(fd: i32, offset: u64) -> io::Result<u64> {
     let result = unsafe { libc::lseek(fd, offset as i64, libc::SEEK_DATA) };
     if result < 0 {
         Err(io::Error::last_os_error())
@@ -88,7 +90,8 @@ fn seek_data(fd: i32, offset: u64) -> io::Result<u64> {
     }
 }
 
-fn seek_hole(fd: i32, offset: u64) -> io::Result<u64> {
+/// Seek to the next hole at or after the given offset.
+pub fn seek_hole(fd: i32, offset: u64) -> io::Result<u64> {
     let result = unsafe { libc::lseek(fd, offset as i64, libc::SEEK_HOLE) };
     if result < 0 {
         Err(io::Error::last_os_error())
