@@ -335,7 +335,7 @@ fn is_btrfs_subvol_readonly(path: &Path) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::Path;
 
     #[test]
     fn get_fs_info() {
@@ -345,7 +345,7 @@ mod tests {
         #[cfg(not(windows))]
         let test_path = Path::new("/");
 
-        let info = get_fs_info(test_path).unwrap();
+        let info = super::get_fs_info(test_path).unwrap();
         // Root filesystem should have a type
         assert!(info.fs_type.is_some());
     }
@@ -358,7 +358,7 @@ mod tests {
         #[cfg(not(windows))]
         let test_path = std::path::PathBuf::from("/tmp");
 
-        let readonly = is_readonly(&test_path).unwrap();
+        let readonly = super::is_readonly(&test_path).unwrap();
         assert!(!readonly);
     }
 }

@@ -6,7 +6,7 @@
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom, Write};
 
-use extentria::{DataRange, RangeReader, RangeReaderImpl, ranges_for_file};
+use extentria::{RangeReader, RangeReaderImpl, ranges_for_file};
 
 /// Helper to check if an error indicates unsupported filesystem.
 fn is_unsupported_error(err: &io::Error) -> bool {

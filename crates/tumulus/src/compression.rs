@@ -3,9 +3,11 @@
 //! Provides functions to compress and decompress catalog files using zstd,
 //! as well as utilities to open catalogs that may or may not be compressed.
 
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{self, BufReader, BufWriter, Read, Write},
+    path::Path,
+};
 
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
@@ -130,23 +132,26 @@ pub fn compress_catalog_in_place(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::io::Write;
+    use std::{
+        fs::File,
+        io::{Read as _, Write},
+    };
+    use tempfile::NamedTempFile;
 
     #[test]
     fn is_zstd_compressed() {
         // Create a temp file with zstd magic
         let mut temp = NamedTempFile::new().unwrap();
-        temp.write_all(&ZSTD_MAGIC).unwrap();
+        temp.write_all(&super::ZSTD_MAGIC).unwrap();
         temp.write_all(b"some data").unwrap();
         temp.flush().unwrap();
-        assert!(is_zstd_compressed(temp.path()).unwrap());
+        assert!(super::is_zstd_compressed(temp.path()).unwrap());
 
         // Create a temp file without zstd magic
         let mut temp2 = NamedTempFile::new().unwrap();
         temp2.write_all(b"not compressed").unwrap();
         temp2.flush().unwrap();
-        assert!(!is_zstd_compressed(temp2.path()).unwrap());
+        assert!(!super::is_zstd_compressed(temp2.path()).unwrap());
     }
 
     #[test]
@@ -160,14 +165,14 @@ mod tests {
 
         // Compress
         let compressed = NamedTempFile::new().unwrap();
-        compress_file(original.path(), compressed.path()).unwrap();
+        super::compress_file(original.path(), compressed.path()).unwrap();
 
         // Verify it's compressed
-        assert!(is_zstd_compressed(compressed.path()).unwrap());
+        assert!(super::is_zstd_compressed(compressed.path()).unwrap());
 
         // Decompress
         let decompressed = NamedTempFile::new().unwrap();
-        decompress_file(compressed.path(), decompressed.path()).unwrap();
+        super::decompress_file(compressed.path(), decompressed.path()).unwrap();
 
         // Verify content matches
         let mut result = Vec::new();
