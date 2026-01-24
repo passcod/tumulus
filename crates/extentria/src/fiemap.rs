@@ -318,9 +318,6 @@ impl FiemapLookup {
     ) -> Result<FiemapSearchResults<'fd>> {
         let buf_len = buf.len();
 
-        // FIXME: can we use .get_mut() / .get() instead of [] in this?
-        // current should be safe, but eliminating potential panics is good?
-
         // SAFETY: we must always have enough buffer space for the search key, buf_size u64,
         // at least one result header + item, and the sentinel. From experimentation, passing
         // shorter buffers doesn't result in UB (it errors cleanly), but better safe than sorry.
