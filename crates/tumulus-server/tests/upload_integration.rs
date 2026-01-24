@@ -11,13 +11,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use reqwest::blocking::Client;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::io::Write;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use tumulus::{create_catalog_schema, process_file, write_catalog};
 use tumulus_server::{FsStorage, UploadDb, router};
 
 /// Request body for initiating a catalog upload.
@@ -152,7 +154,7 @@ impl Drop for TestServer {
     }
 }
 
-/// Test fixture that creates a test source directory and catalog.
+/// Test fixture that creates a test source directory and catalog using the tumulus library.
 struct TestFixture {
     _source_dir: TempDir,
     _catalog_dir: TempDir,
@@ -160,23 +162,28 @@ struct TestFixture {
     catalog_id: Uuid,
     catalog_checksum: String,
     extent_ids: Vec<String>,
+    /// The file contents used to create this fixture (for extent lookup)
+    file_contents: Vec<(&'static str, &'static str)>,
 }
 
 impl TestFixture {
     /// Create a new test fixture with some test files.
     fn new() -> Self {
+        Self::with_files(&[
+            ("file1.txt", "Hello, world!"),
+            ("file2.txt", "This is a test file with some content."),
+            ("subdir/file3.txt", "Nested file content here."),
+        ])
+    }
+
+    /// Create a test fixture with custom file contents.
+    fn with_files(files: &[(&'static str, &'static str)]) -> Self {
         let source_dir = TempDir::new().expect("Failed to create source dir");
         let catalog_dir = TempDir::new().expect("Failed to create catalog dir");
         let catalog_path = catalog_dir.path().join("test.catalog");
 
-        // Create some test files with known content
-        let files = [
-            ("file1.txt", "Hello, world!"),
-            ("file2.txt", "This is a test file with some content."),
-            ("subdir/file3.txt", "Nested file content here."),
-        ];
-
-        for (path, content) in &files {
+        // Create the test files
+        for (path, content) in files {
             let full_path = source_dir.path().join(path);
             if let Some(parent) = full_path.parent() {
                 fs::create_dir_all(parent).unwrap();
@@ -184,99 +191,69 @@ impl TestFixture {
             fs::write(&full_path, content).unwrap();
         }
 
-        // Create a catalog for these files
+        // Create a catalog using the tumulus library
         let catalog_id = Uuid::new_v4();
-
-        // Create catalog database
         let conn = Connection::open(&catalog_path).expect("Failed to create catalog db");
 
-        // Initialize schema matching the actual tumulus catalog format
-        conn.execute_batch(
-            r#"
-            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE extents (extent_id BLOB PRIMARY KEY, bytes INTEGER NOT NULL);
-            CREATE TABLE blobs (blob_id BLOB PRIMARY KEY, bytes INTEGER NOT NULL, extents INTEGER NOT NULL);
-            CREATE TABLE blob_extents (
-                blob_id BLOB NOT NULL,
-                extent_id BLOB,
-                offset INTEGER NOT NULL,
-                bytes INTEGER NOT NULL,
-                PRIMARY KEY (blob_id, offset)
-            );
-            CREATE INDEX idx_blob_extents_blob ON blob_extents(blob_id);
-            CREATE INDEX idx_blob_extents_extent ON blob_extents(extent_id);
-            CREATE TABLE files (
-                file_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                path BLOB NOT NULL,
-                blob_id BLOB,
-                ts_modified INTEGER,
-                unix_mode INTEGER
-            );
-            "#,
-        )
-        .expect("Failed to create schema");
+        // Initialize schema using tumulus library
+        create_catalog_schema(&conn).expect("Failed to create schema");
 
         // Insert metadata
         let machine_id = "test-machine-id";
         conn.execute(
             "INSERT INTO metadata (key, value) VALUES ('id', ?)",
-            [format!("\"{}\"", catalog_id.simple())],
+            params![json!(catalog_id.simple().to_string()).to_string()],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO metadata (key, value) VALUES ('machine', ?)",
-            [format!("\"{}\"", machine_id)],
+            params![json!(machine_id).to_string()],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO metadata (key, value) VALUES ('source_path', ?)",
-            [format!("\"{}\"", source_dir.path().display())],
+            params![json!(source_dir.path().to_string_lossy()).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES ('created', ?)",
+            params![
+                json!(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64
+                )
+                .to_string()
+            ],
         )
         .unwrap();
 
-        // Create blobs and extents for each file
-        let mut extent_ids = Vec::new();
-
-        for (path, content) in &files {
-            let content_bytes = content.as_bytes();
-            let hash = blake3::hash(content_bytes);
-            let hash_bytes = hash.as_bytes();
-            let hash_hex = hash.to_hex().to_string();
-
-            extent_ids.push(hash_hex.clone());
-
-            // Insert extent
-            conn.execute(
-                "INSERT OR IGNORE INTO extents (extent_id, bytes) VALUES (?, ?)",
-                rusqlite::params![hash_bytes.as_slice(), content_bytes.len() as i64],
-            )
-            .unwrap();
-
-            // Insert blob (blob_id = extent_id for single-extent files)
-            conn.execute(
-                "INSERT OR IGNORE INTO blobs (blob_id, bytes, extents) VALUES (?, ?, 1)",
-                rusqlite::params![hash_bytes.as_slice(), content_bytes.len() as i64],
-            )
-            .unwrap();
-
-            // Insert blob_extent
-            conn.execute(
-                "INSERT INTO blob_extents (blob_id, extent_id, offset, bytes) VALUES (?, ?, 0, ?)",
-                rusqlite::params![
-                    hash_bytes.as_slice(),
-                    hash_bytes.as_slice(),
-                    content_bytes.len() as i64
-                ],
-            )
-            .unwrap();
-
-            // Insert file
-            conn.execute(
-                "INSERT INTO files (path, blob_id, ts_modified, unix_mode) VALUES (?, ?, 0, 0)",
-                rusqlite::params![path.as_bytes(), hash_bytes.as_slice(),],
-            )
-            .unwrap();
+        // Process files using tumulus library
+        let mut file_infos = Vec::new();
+        for (path, _content) in files {
+            let full_path = source_dir.path().join(path);
+            let file_info =
+                process_file(&full_path, source_dir.path()).expect("Failed to process file");
+            file_infos.push(file_info);
         }
+
+        // Write catalog using tumulus library
+        write_catalog(&conn, &file_infos).expect("Failed to write catalog");
+
+        // Collect extent IDs from the catalog
+        let extent_ids = {
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT extent_id FROM blob_extents WHERE extent_id IS NOT NULL")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    let extent_id: Vec<u8> = row.get(0)?;
+                    Ok(hex::encode(extent_id))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect::<Vec<_>>()
+        };
 
         drop(conn);
 
@@ -291,11 +268,23 @@ impl TestFixture {
             catalog_id,
             catalog_checksum,
             extent_ids,
+            file_contents: files.to_vec(),
         }
     }
 
     fn catalog_data(&self) -> Vec<u8> {
         fs::read(&self.catalog_path).expect("Failed to read catalog")
+    }
+
+    /// Find extent data by hash from the source files.
+    fn find_extent_data(&self, extent_id: &str) -> Vec<u8> {
+        for (_path, content) in &self.file_contents {
+            let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+            if hash.to_lowercase() == extent_id.to_lowercase() {
+                return content.as_bytes().to_vec();
+            }
+        }
+        panic!("Extent {} not found in test files", extent_id);
     }
 }
 
@@ -881,15 +870,32 @@ fn test_check_catalogs_with_existing() {
 fn test_patch_upload() {
     let server = TestServer::start();
     let client = Client::new();
-    let fixture = TestFixture::new();
 
-    // First, upload a reference catalog completely
-    let catalog_data = fixture.catalog_data();
+    // Create reference fixture with initial files
+    let reference_fixture = TestFixture::with_files(&[
+        ("file1.txt", "Hello, world!"),
+        ("file2.txt", "This is a test file with some content."),
+        ("subdir/file3.txt", "Nested file content here."),
+    ]);
 
-    // Initiate
+    // Create target fixture with modified files (some same, some different)
+    let target_fixture = TestFixture::with_files(&[
+        ("file1.txt", "Hello, world!"), // Same as reference
+        ("file2.txt", "This is MODIFIED content in the test file."), // Different
+        ("subdir/file3.txt", "Nested file content here."), // Same as reference
+        (
+            "file4.txt",
+            "A brand new file that wasn't in the reference.",
+        ), // New file
+    ]);
+
+    // First, upload the reference catalog completely
+    let reference_data = reference_fixture.catalog_data();
+
+    // Initiate reference
     let init_req = InitiateRequest {
-        id: fixture.catalog_id,
-        checksum: fixture.catalog_checksum.clone(),
+        id: reference_fixture.catalog_id,
+        checksum: reference_fixture.catalog_checksum.clone(),
     };
     let resp = client
         .post(format!("{}/catalogs", server.url()))
@@ -898,23 +904,23 @@ fn test_patch_upload() {
         .unwrap();
     assert!(resp.status().is_success());
 
-    // Upload catalog
+    // Upload reference catalog
     let resp = client
         .put(format!(
             "{}/catalogs/{}",
             server.url(),
-            fixture.catalog_id.simple()
+            reference_fixture.catalog_id.simple()
         ))
         .header("Content-Type", "application/octet-stream")
-        .body(catalog_data.clone())
+        .body(reference_data.clone())
         .send()
         .unwrap();
     assert!(resp.status().is_success());
     let upload_resp: UploadResponse = resp.json().unwrap();
 
-    // Upload extents
+    // Upload reference extents
     for extent_id in &upload_resp.missing_extents {
-        let extent_data = find_extent_data(&fixture, extent_id);
+        let extent_data = reference_fixture.find_extent_data(extent_id);
         let resp = client
             .put(format!(
                 "{}/extents/{}",
@@ -933,22 +939,26 @@ fn test_patch_upload() {
         .post(format!(
             "{}/catalogs/{}",
             server.url(),
-            fixture.catalog_id.simple()
+            reference_fixture.catalog_id.simple()
         ))
         .send()
         .unwrap();
     assert_eq!(resp.status().as_u16(), 204);
 
-    // Create a slightly different "target" catalog (just use the same data for simplicity)
-    let target_id = Uuid::new_v4();
-    let target_data = catalog_data.clone(); // In real use this would be different
-    let target_checksum = blake3::hash(&target_data).to_hex().to_string();
+    // Now upload the target catalog via patch
+    let target_data = target_fixture.catalog_data();
 
     // Generate a binary patch from reference to target
     let mut patch_data = Vec::new();
-    qbsdiff::Bsdiff::new(&catalog_data, &target_data)
+    qbsdiff::Bsdiff::new(&reference_data, &target_data)
         .compare(&mut patch_data)
         .expect("Failed to generate patch");
+
+    // Verify the patch is smaller than the full catalog (sanity check for similar catalogs)
+    assert!(
+        patch_data.len() < target_data.len(),
+        "Patch should be smaller than full catalog for similar data"
+    );
 
     // Compress the patch
     let mut compressed_patch = Vec::new();
@@ -960,8 +970,8 @@ fn test_patch_upload() {
 
     // Initiate the target catalog upload
     let init_req = InitiateRequest {
-        id: target_id,
-        checksum: target_checksum.clone(),
+        id: target_fixture.catalog_id,
+        checksum: target_fixture.catalog_checksum.clone(),
     };
     let resp = client
         .post(format!("{}/catalogs", server.url()))
@@ -974,9 +984,9 @@ fn test_patch_upload() {
     let patch_url = format!(
         "{}/catalogs/{}/patch?reference={}&checksum={}",
         server.url(),
-        target_id.simple(),
-        fixture.catalog_id.simple(),
-        target_checksum
+        target_fixture.catalog_id.simple(),
+        reference_fixture.catalog_id.simple(),
+        target_fixture.catalog_checksum
     );
 
     let resp = client
@@ -993,18 +1003,54 @@ fn test_patch_upload() {
     );
 
     let patch_resp: UploadResponse = resp.json().unwrap();
-    // All extents should already exist from the reference upload
+
+    // Should have some missing extents for the new/modified files
+    // file2.txt was modified, file4.txt is new
     assert!(
-        patch_resp.missing_extents.is_empty(),
-        "Expected no missing extents since they were already uploaded"
+        patch_resp.missing_extents.len() >= 2,
+        "Expected at least 2 missing extents for modified and new files, got {}",
+        patch_resp.missing_extents.len()
     );
+
+    // Upload the missing extents from the target fixture
+    for extent_id in &patch_resp.missing_extents {
+        let extent_data = target_fixture.find_extent_data(extent_id);
+        let resp = client
+            .put(format!(
+                "{}/extents/{}",
+                server.url(),
+                extent_id.to_lowercase()
+            ))
+            .header("Content-Type", "application/octet-stream")
+            .body(extent_data)
+            .send()
+            .unwrap();
+        assert!(resp.status().is_success());
+    }
 
     // Finalize the patched catalog
     let resp = client
-        .post(format!("{}/catalogs/{}", server.url(), target_id.simple()))
+        .post(format!(
+            "{}/catalogs/{}",
+            server.url(),
+            target_fixture.catalog_id.simple()
+        ))
         .send()
         .unwrap();
     assert_eq!(resp.status().as_u16(), 204);
+
+    // Verify the catalog was stored correctly by checking it exists
+    let check_req = CheckCatalogsRequest {
+        ids: vec![target_fixture.catalog_id.simple().to_string()],
+    };
+    let resp = client
+        .post(format!("{}/catalogs/check", server.url()))
+        .json(&check_req)
+        .send()
+        .unwrap();
+    assert!(resp.status().is_success());
+    let check_resp: CheckCatalogsResponse = resp.json().unwrap();
+    assert_eq!(check_resp.existing.len(), 1);
 }
 
 // ============================================================================
@@ -1012,20 +1058,6 @@ fn test_patch_upload() {
 // ============================================================================
 
 /// Find the content data for an extent by its hash.
-fn find_extent_data(_fixture: &TestFixture, extent_id: &str) -> Vec<u8> {
-    // Read files and find the one matching this extent hash
-    let files = [
-        ("file1.txt", "Hello, world!"),
-        ("file2.txt", "This is a test file with some content."),
-        ("subdir/file3.txt", "Nested file content here."),
-    ];
-
-    for (_path, content) in &files {
-        let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-        if hash.to_lowercase() == extent_id.to_lowercase() {
-            return content.as_bytes().to_vec();
-        }
-    }
-
-    panic!("Extent {} not found in test files", extent_id);
+fn find_extent_data(fixture: &TestFixture, extent_id: &str) -> Vec<u8> {
+    fixture.find_extent_data(extent_id)
 }
