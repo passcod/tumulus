@@ -79,7 +79,7 @@ impl RangeReaderImpl for RangeReader {
 
 /// Check if an error indicates FIEMAP is not supported by this filesystem.
 fn is_fiemap_unsupported(err: &io::Error) -> bool {
-    // Note: ENOTSUP and EOPNOTSUPP are the same value on Linux
+    // note: ENOTSUP and EOPNOTSUPP are the same value on Linux
     matches!(
         err.raw_os_error(),
         Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY)

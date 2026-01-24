@@ -50,7 +50,7 @@ pub(crate) struct FiemapRequest {
     _reserved: u32,
 }
 
-#[derive(Debug, Clone, FromBytes, IntoBytes, KnownLayout, Immutable)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C)]
 pub struct FiemapExtent {
     /// Byte offset of the extent in the file.
@@ -433,7 +433,7 @@ impl FiemapSearchResults<'_> {
 }
 
 impl<'f> Iterator for FiemapSearchResults<'f> {
-    type Item = std::io::Result<&'f FiemapExtent>;
+    type Item = std::io::Result<FiemapExtent>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.seen_last_extent {
@@ -464,10 +464,9 @@ impl<'f> Iterator for FiemapSearchResults<'f> {
                         self.seen_last_extent = true;
                     }
 
-                    // SAFETY: honestly this one I'm unsure about
-                    return Some(Ok(unsafe {
-                        transmute::<&FiemapExtent, &'f FiemapExtent>(result)
-                    }));
+                    // FIXME: i'd have really liked to return the borrow
+                    // but I can't see a way to make the lifetimes work
+                    return Some(Ok(*result));
                 }
                 Err(err) => {
                     // if we fail the parse, we can't safely go forward on this page
