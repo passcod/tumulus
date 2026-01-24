@@ -17,9 +17,9 @@ use tumulus::{
     get_hostname, get_machine_id, is_readonly, process_file_with_reader, write_catalog,
 };
 
+/// Build a snapshot catalog from a directory tree
 #[derive(Parser, Debug)]
 #[command(name = "tumulus")]
-#[command(about = "Build a snapshot catalog from a directory tree")]
 struct Args {
     /// Source directory to catalog
     source_path: PathBuf,
