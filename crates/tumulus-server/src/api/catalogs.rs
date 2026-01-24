@@ -10,11 +10,10 @@
 use std::io::{BufReader, Write};
 use std::sync::Arc;
 
-use axum::extract::Query;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put},
@@ -103,6 +102,8 @@ pub fn router<S: Storage>() -> Router<AppState<S>> {
         .route("/{id}", put(upload_catalog))
         .route("/{id}", post(finalize_upload))
         .route("/{id}/patch", put(upload_catalog_patch))
+        // Allow large catalog uploads (256 MB)
+        .layer(DefaultBodyLimit::max(256 * 1024 * 1024))
 }
 
 /// GET /catalogs - List all complete catalogs
