@@ -1,34 +1,23 @@
+//! Compare two catalogs and report transfer requirements
+
 use std::path::PathBuf;
 
-use clap::Parser;
-use lloggs::LoggingArgs;
+use clap::Args;
 use tracing::info;
 
 use tumulus::open_catalog;
 
-#[derive(Parser, Debug)]
-#[command(name = "compare-catalogs")]
-#[command(about = "Compare two catalogs and report transfer requirements")]
-struct Args {
+/// Compare two catalogs and report transfer requirements
+#[derive(Args, Debug)]
+pub struct CompareArgs {
     /// Local catalog file (source)
     local_catalog: PathBuf,
 
     /// Remote catalog file (destination)
     remote_catalog: PathBuf,
-
-    #[command(flatten)]
-    logging: LoggingArgs,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let args = Args::parse();
-    let _guard = args.logging.setup(|v| match v {
-        0 => "warn",
-        1 => "info",
-        2 => "debug",
-        _ => "trace",
-    })?;
-
+pub fn run(args: CompareArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let local_path = &args.local_catalog;
     let remote_path = &args.remote_catalog;
 

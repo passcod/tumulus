@@ -1,6 +1,6 @@
-//! tumulus-upload - Upload catalogs to a tumulus server.
+//! Upload catalogs to a tumulus server.
 //!
-//! This binary takes a catalog file, verifies it matches the local machine,
+//! This command takes a catalog file, verifies it matches the local machine,
 //! and uploads it to a tumulus server.
 //!
 //! Supports delta uploads using `--reference` to specify previous catalog files.
@@ -18,8 +18,7 @@ use std::{
     },
 };
 
-use clap::Parser;
-use lloggs::LoggingArgs;
+use clap::Args;
 use rayon::prelude::*;
 use reqwest::blocking::Client;
 use rusqlite::Connection;
@@ -29,10 +28,9 @@ use uuid::Uuid;
 
 use tumulus::{decompress_file, is_zstd_compressed, open_catalog};
 
-#[derive(Parser)]
-#[command(name = "tumulus-upload")]
-#[command(about = "Upload a catalog to a tumulus server")]
-struct Args {
+/// Upload a catalog to a tumulus server
+#[derive(Args, Debug)]
+pub struct UploadArgs {
     /// Path to the catalog file to upload
     catalog: PathBuf,
 
@@ -58,9 +56,6 @@ struct Args {
     /// the full catalog.
     #[arg(long, short = 'r')]
     reference: Vec<PathBuf>,
-
-    #[command(flatten)]
-    logging: LoggingArgs,
 }
 
 /// Request body for initiating a catalog upload.
@@ -198,16 +193,8 @@ struct ExtentLocation {
     length: u64,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let args = Args::parse();
-    let _guard = args.logging.setup(|v| match v {
-        0 => "warn",
-        1 => "info",
-        2 => "debug",
-        _ => "trace",
-    })?;
-
-    if let Err(e) = run(args) {
+pub fn run(args: UploadArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Err(e) = run_inner(args) {
         error!("{}", e);
         std::process::exit(1);
     }
@@ -215,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-fn run(args: Args) -> Result<(), UploadError> {
+fn run_inner(args: UploadArgs) -> Result<(), UploadError> {
     info!(catalog = ?args.catalog, server = %args.server, "Starting catalog upload");
 
     // Open and read catalog metadata

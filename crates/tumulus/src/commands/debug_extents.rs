@@ -1,16 +1,16 @@
+//! Display extent information for files
+
 use std::{fs::File, io, path::PathBuf};
 
-use clap::Parser;
+use clap::Args;
 use extentria::{DataRange, RangeReader, RangeReaderImpl};
-use lloggs::LoggingArgs;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use tracing::{debug, error, info, warn};
 
-#[derive(Parser, Debug)]
-#[command(name = "debug-extents")]
-#[command(about = "Display extent information for files")]
-struct Args {
+/// Display extent information for files
+#[derive(Args, Debug)]
+pub struct DebugExtentsArgs {
     /// Files to analyze
     #[arg(required = true)]
     paths: Vec<PathBuf>,
@@ -18,9 +18,6 @@ struct Args {
     /// Make extent read errors fatal (exit on first error)
     #[arg(long, short = 'e')]
     fatal_errors: bool,
-
-    #[command(flatten)]
-    logging: LoggingArgs,
 }
 
 struct ExtentDisplay {
@@ -131,15 +128,7 @@ fn process_file(path: PathBuf) -> Result<FileResult, std::io::Error> {
     })
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let args = Args::parse();
-    let _guard = args.logging.setup(|v| match v {
-        0 => "warn",
-        1 => "info",
-        2 => "debug",
-        _ => "trace",
-    })?;
-
+pub fn run(args: DebugExtentsArgs) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(files = args.paths.len(), "Starting extent analysis");
 
     // Process all files in parallel
