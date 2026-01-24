@@ -134,7 +134,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn test_is_zstd_compressed() {
+    fn is_zstd_compressed() {
         // Create a temp file with zstd magic
         let mut temp = NamedTempFile::new().unwrap();
         temp.write_all(&ZSTD_MAGIC).unwrap();
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_decompress_roundtrip() {
+    fn compress_decompress_roundtrip() {
         let original_data = b"Hello, this is test data for compression!";
 
         // Create original file

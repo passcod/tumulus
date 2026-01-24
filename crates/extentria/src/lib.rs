@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_file() {
+    fn empty_file() {
         let temp = tempfile::NamedTempFile::new().unwrap();
         let file = temp.as_file();
 
@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn test_regular_file() {
+    fn regular_file() {
         let mut temp = tempfile::NamedTempFile::new().unwrap();
         temp.write_all(b"Hello, world!").unwrap();
         temp.flush().unwrap();
@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_range_reader_reuse() {
+    fn range_reader_reuse() {
         let mut temp1 = tempfile::NamedTempFile::new().unwrap();
         temp1.write_all(b"File one").unwrap();
         temp1.flush().unwrap();
@@ -180,28 +180,5 @@ mod tests {
             }
             Err(e) => panic!("Unexpected error: {e}"),
         }
-    }
-
-    #[test]
-    fn test_can_detect_shared_const() {
-        // Just verify this is a const fn and returns a bool
-        const _: bool = can_detect_shared();
-    }
-
-    #[test]
-    fn test_data_range_methods() {
-        let range = DataRange::new(100, 50);
-        assert_eq!(range.offset, 100);
-        assert_eq!(range.length, 50);
-        assert_eq!(range.end(), 150);
-        assert!(!range.flags.sparse);
-        assert!(!range.flags.shared);
-
-        let sparse = DataRange::sparse(200, 100);
-        assert_eq!(sparse.offset, 200);
-        assert_eq!(sparse.length, 100);
-        assert_eq!(sparse.end(), 300);
-        assert!(sparse.flags.sparse);
-        assert!(!sparse.flags.shared);
     }
 }

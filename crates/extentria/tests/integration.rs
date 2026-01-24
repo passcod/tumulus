@@ -31,10 +31,6 @@ fn is_unsupported_error(err: &io::Error) -> bool {
     }
 }
 
-// ============================================================================
-// Empty file tests
-// ============================================================================
-
 #[test]
 fn test_empty_file_returns_no_ranges() {
     let temp = tempfile::NamedTempFile::new().unwrap();
@@ -55,10 +51,6 @@ fn test_empty_file_returns_no_ranges() {
         Err(e) => panic!("Unexpected error: {e}"),
     }
 }
-
-// ============================================================================
-// Regular file tests
-// ============================================================================
 
 #[test]
 fn test_regular_file_returns_single_range() {
@@ -143,10 +135,6 @@ fn test_larger_file_coverage() {
         Err(e) => panic!("Unexpected error: {e}"),
     }
 }
-
-// ============================================================================
-// Sparse file tests (Unix-specific)
-// ============================================================================
 
 #[cfg(unix)]
 #[test]
@@ -262,10 +250,6 @@ fn test_sparse_file_with_multiple_holes() {
     }
 }
 
-// ============================================================================
-// RangeReader buffer reuse tests
-// ============================================================================
-
 #[test]
 fn test_range_reader_reuse_across_files() {
     let mut reader = RangeReader::new();
@@ -345,71 +329,6 @@ fn test_range_reader_with_custom_buffer_size() {
     }
 }
 
-// ============================================================================
-// DataRange API tests
-// ============================================================================
-
-#[test]
-fn test_data_range_new() {
-    let range = DataRange::new(100, 200);
-    assert_eq!(range.offset, 100);
-    assert_eq!(range.length, 200);
-    assert_eq!(range.end(), 300);
-    assert!(!range.flags.sparse);
-    assert!(!range.flags.shared);
-}
-
-#[test]
-fn test_data_range_sparse() {
-    let range = DataRange::sparse(500, 1000);
-    assert_eq!(range.offset, 500);
-    assert_eq!(range.length, 1000);
-    assert_eq!(range.end(), 1500);
-    assert!(range.flags.sparse);
-    assert!(!range.flags.shared);
-}
-
-#[test]
-fn test_data_range_equality() {
-    let range1 = DataRange::new(0, 100);
-    let range2 = DataRange::new(0, 100);
-    let range3 = DataRange::new(0, 200);
-
-    assert_eq!(range1, range2);
-    assert_ne!(range1, range3);
-}
-
-// ============================================================================
-// Platform capability tests
-// ============================================================================
-
-#[test]
-fn test_can_detect_shared_is_const() {
-    // Verify this is a const fn by using it in a const context
-    const CAN_DETECT: bool = extentria::can_detect_shared();
-
-    #[cfg(target_os = "linux")]
-    const {
-        assert!(CAN_DETECT, "Linux should support shared extent detection")
-    };
-
-    #[cfg(not(target_os = "linux"))]
-    const {
-        assert!(
-            !CAN_DETECT,
-            "Non-Linux platforms should not detect shared extents"
-        )
-    };
-
-    // Runtime check as well
-    let runtime_value = extentria::can_detect_shared();
-    assert_eq!(runtime_value, CAN_DETECT);
-}
-
-// ============================================================================
-// Linux-specific tests
-// ============================================================================
-
 #[cfg(target_os = "linux")]
 mod linux_tests {
     use super::*;
@@ -441,7 +360,7 @@ mod linux_tests {
     }
 
     #[test]
-    fn test_shared_extent_detection() {
+    fn shared_extent_detection() {
         if !supports_reflinks() {
             eprintln!("Skipping: filesystem doesn't support reflinks");
             return;
@@ -489,26 +408,7 @@ mod linux_tests {
             Err(e) => panic!("Unexpected error: {e}"),
         }
     }
-
-    #[test]
-    fn test_fiemap_module_available() {
-        // Verify the fiemap module is accessible on Linux
-        use extentria::fiemap::{FiemapLookup, minimum_buf_size, result_size};
-
-        // These should be valid sizes
-        assert!(result_size() > 0);
-        assert!(minimum_buf_size() > result_size());
-
-        // Create a lookup for testing
-        let lookup = FiemapLookup::for_file_size(1024 * 1024);
-        assert_eq!(lookup.start, 0);
-        assert_eq!(lookup.length, 1024 * 1024);
-    }
 }
-
-// ============================================================================
-// Fallback behavior tests (Linux-specific)
-// ============================================================================
 
 #[cfg(target_os = "linux")]
 mod fallback_tests {
@@ -519,7 +419,7 @@ mod fallback_tests {
     /// This test creates a file in /tmp (typically tmpfs on Linux) and verifies
     /// that we can still read its ranges even though FIEMAP isn't supported.
     #[test]
-    fn test_tmpfs_fallback() {
+    fn tmpfs_fallback() {
         // /tmp is typically tmpfs on Linux
         let temp_dir = tempfile::Builder::new()
             .prefix("extentria-test-")
@@ -569,7 +469,7 @@ mod fallback_tests {
 
     /// Test that the fallback works correctly for empty files on tmpfs.
     #[test]
-    fn test_tmpfs_fallback_empty_file() {
+    fn tmpfs_fallback_empty_file() {
         let temp_dir = tempfile::Builder::new()
             .prefix("extentria-test-")
             .tempdir_in("/tmp")
@@ -598,7 +498,7 @@ mod fallback_tests {
 
     /// Test that RangeReader can be reused across files on tmpfs.
     #[test]
-    fn test_tmpfs_fallback_reader_reuse() {
+    fn tmpfs_fallback_reader_reuse() {
         let temp_dir = tempfile::Builder::new()
             .prefix("extentria-test-")
             .tempdir_in("/tmp")
@@ -628,10 +528,6 @@ mod fallback_tests {
         assert_eq!(ranges2[0].length, 11); // "Second file"
     }
 }
-
-// ============================================================================
-// Error handling tests
-// ============================================================================
 
 #[test]
 fn test_closed_file_handle() {

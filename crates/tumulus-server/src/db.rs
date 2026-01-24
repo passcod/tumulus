@@ -311,7 +311,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_create_and_get_catalog() {
+    fn create_and_get_catalog() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
         let checksum = [0x42u8; 32].into();
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_by_checksum() {
+    fn find_by_checksum() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
         let checksum = [0x42u8; 32].into();
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_status() {
+    fn update_status() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
         let checksum = [0x42u8; 32].into();
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn test_catalog_extents() {
+    fn catalog_extents() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
         let checksum = [0x42u8; 32].into();
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_catalog() {
+    fn delete_catalog() {
         let db = UploadDb::open_in_memory().unwrap();
         let id = Uuid::new_v4();
         let checksum = [0x42u8; 32].into();

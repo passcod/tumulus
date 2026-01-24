@@ -102,7 +102,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_regions_with_holes() {
+    fn regions_with_holes() {
         let layout = BlobLayout {
             total_bytes: 1024,
             extents: vec![
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn test_no_holes() {
+    fn no_holes() {
         let layout = BlobLayout {
             total_bytes: 512,
             extents: vec![

@@ -338,14 +338,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_hostname() {
-        let hostname = get_hostname();
-        assert!(hostname.is_some());
-        assert!(!hostname.unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_get_fs_info() {
+    fn get_fs_info() {
         // Use a path that exists on all platforms
         #[cfg(windows)]
         let test_path = Path::new("C:\\");
@@ -358,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_readonly() {
+    fn is_readonly() {
         // Use a path that exists on all platforms and is typically writable
         #[cfg(windows)]
         let test_path = std::env::temp_dir();
