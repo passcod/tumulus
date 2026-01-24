@@ -1,6 +1,6 @@
 //! Filesystem information utilities.
 //!
-//! Provides functions to get filesystem type, UUID, and hostname.
+//! Provides functions to get filesystem type, UUID, and read-only status.
 
 use std::{fs, io, path::Path};
 #[cfg(target_os = "linux")]
@@ -25,11 +25,6 @@ pub struct FsInfo {
     pub fs_type: Option<String>,
     /// The filesystem UUID if available
     pub fs_id: Option<String>,
-}
-
-/// Get the hostname of the current machine.
-pub fn get_hostname() -> Option<String> {
-    hostname::get().ok().and_then(|h| h.into_string().ok())
 }
 
 /// Get filesystem information for a path (Linux implementation).
@@ -307,7 +302,7 @@ fn is_btrfs_subvol_readonly(path: &Path) -> io::Result<bool> {
     let result = unsafe {
         libc::ioctl(
             fd,
-            BTRFS_IOC_SUBVOL_GETFLAGS as libc::c_ulong,
+            BTRFS_IOC_SUBVOL_GETFLAGS.try_into().unwrap(),
             &mut flags as *mut u64,
         )
     };

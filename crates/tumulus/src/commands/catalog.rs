@@ -12,10 +12,11 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use fs_info::{get_fs_info, is_readonly};
 use tumulus::{
     DEFAULT_COMPRESSION_LEVEL, FileInfo, RangeReader, RangeReaderImpl,
-    compression::compress_file_with_level, compute_tree_hash, create_catalog_schema, get_fs_info,
-    get_hostname, get_machine_id, is_readonly, process_file_with_reader, write_catalog,
+    compression::compress_file_with_level, compute_tree_hash, create_catalog_schema, get_hostname,
+    get_machine_id, process_file_with_reader, write_catalog,
 };
 
 /// Build a snapshot catalog from a directory tree

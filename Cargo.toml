@@ -2,9 +2,11 @@
 resolver = "3"
 members = [
     "crates/extentria",
+    "crates/fs-info",
     "crates/tumulus",
     "crates/tumulus-server",
 ]
 
 [workspace.dependencies]
 extentria = { version = "0.0.0", path = "crates/extentria" }
+fs-info = { version = "0.0.0", path = "crates/fs-info" }

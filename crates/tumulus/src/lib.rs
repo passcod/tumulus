@@ -7,7 +7,6 @@ pub mod catalog;
 pub mod compression;
 pub mod extents;
 pub mod file;
-pub mod fsinfo;
 pub mod id;
 pub mod machine;
 pub mod tree;
@@ -22,7 +21,6 @@ pub use extents::{
     BlobInfo, ExtentInfo, MAX_EXTENT_SIZE, process_file_extents, process_file_extents_with_reader,
 };
 pub use file::{FileInfo, process_file, process_file_with_reader};
-pub use fsinfo::{FsInfo, get_fs_info, get_hostname, is_readonly};
 pub use id::B3Id;
-pub use machine::get_machine_id;
+pub use machine::{get_hostname, get_machine_id};
 pub use tree::compute_tree_hash;
